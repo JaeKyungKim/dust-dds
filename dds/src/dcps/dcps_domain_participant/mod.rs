@@ -1,6 +1,10 @@
-use super::domain_participant_mail::{
-    DcpsDomainParticipantMail, EventServiceMail, MessageServiceMail,
-};
+mod participant_methods;
+mod publisher_methods;
+mod reader_methods;
+mod subscriber_methods;
+mod topic_methods;
+mod writer_methods;
+
 use crate::{
     builtin_topics::{
         BuiltInTopicKey, DCPS_PARTICIPANT, DCPS_PUBLICATION, DCPS_SUBSCRIPTION, DCPS_TOPIC,
@@ -8,7 +12,7 @@ use crate::{
         TopicBuiltinTopicData,
     },
     dcps::{
-        actor::{Actor, ActorAddress},
+        actor::Actor,
         channels::{
             mpsc::MpscSender,
             oneshot::{OneshotSender, oneshot},
@@ -23,15 +27,8 @@ use crate::{
                 SpdpDiscoveredParticipantData,
             },
         },
-        domain_participant_mail::WriterServiceMail,
-        listeners::{
-            data_reader_listener::DcpsDataReaderListener,
-            data_writer_listener::DcpsDataWriterListener,
-            domain_participant_listener::{DcpsDomainParticipantListener, ListenerMail},
-            publisher_listener::DcpsPublisherListener,
-            subscriber_listener::DcpsSubscriberListener,
-            topic_listener::DcpsTopicListener,
-        },
+        dcps_mail::{DcpsMail, EventServiceMail, MessageServiceMail},
+        listeners::domain_participant_listener::ListenerMail,
         status_condition::DcpsStatusCondition,
         status_condition_mail::DcpsStatusConditionMail,
         xtypes_glue::key_and_instance_handle::get_instance_handle_from_dynamic_data,
@@ -47,15 +44,15 @@ use crate::{
         error::{DdsError, DdsResult},
         instance::InstanceHandle,
         qos::{
-            DataReaderQos, DataWriterQos, DomainParticipantQos, PublisherQos, QosKind,
-            SubscriberQos, TopicQos,
+            DataReaderQos, DataWriterQos, DomainParticipantQos, PublisherQos, SubscriberQos,
+            TopicQos,
         },
         qos_policy::{
             BUILT_IN_DATA_REPRESENTATION, DATA_REPRESENTATION_QOS_POLICY_ID,
             DEADLINE_QOS_POLICY_ID, DESTINATIONORDER_QOS_POLICY_ID, DURABILITY_QOS_POLICY_ID,
             DataRepresentationQosPolicy, DestinationOrderQosPolicyKind, DurabilityQosPolicy,
             DurabilityQosPolicyKind, HistoryQosPolicy, HistoryQosPolicyKind,
-            LATENCYBUDGET_QOS_POLICY_ID, LIVELINESS_QOS_POLICY_ID, Length, LifespanQosPolicy,
+            LATENCYBUDGET_QOS_POLICY_ID, LIVELINESS_QOS_POLICY_ID, LifespanQosPolicy,
             OWNERSHIP_QOS_POLICY_ID, OwnershipQosPolicyKind, PRESENTATION_QOS_POLICY_ID,
             QosPolicyId, RELIABILITY_QOS_POLICY_ID, ReliabilityQosPolicy, ReliabilityQosPolicyKind,
             ResourceLimitsQosPolicy, TransportPriorityQosPolicy, XCDR_DATA_REPRESENTATION,
@@ -81,7 +78,7 @@ use crate::{
         types::{PROTOCOLVERSION, VENDOR_ID_S2E},
     },
     rtps_messages::overall_structure::{RtpsMessageRead, RtpsSubmessageReadKind},
-    runtime::{Clock, DdsRuntime, Either, Spawner, Timer, select_future},
+    runtime::{Clock, DdsRuntime, Spawner, Timer},
     transport::{
         self,
         interface::{RtpsTransportParticipant, WriteMessage},
@@ -89,9 +86,7 @@ use crate::{
             BUILT_IN_READER_GROUP, BUILT_IN_READER_WITH_KEY, BUILT_IN_TOPIC, BUILT_IN_WRITER_GROUP,
             BUILT_IN_WRITER_WITH_KEY, CacheChange, ChangeKind, DurabilityKind,
             ENTITYID_PARTICIPANT, ENTITYID_UNKNOWN, EntityId, Guid, GuidPrefix, ReliabilityKind,
-            TopicKind, USER_DEFINED_READER_GROUP, USER_DEFINED_READER_NO_KEY,
-            USER_DEFINED_READER_WITH_KEY, USER_DEFINED_TOPIC, USER_DEFINED_WRITER_GROUP,
-            USER_DEFINED_WRITER_NO_KEY, USER_DEFINED_WRITER_WITH_KEY,
+            TopicKind,
         },
     },
     xtypes::{
@@ -107,7 +102,6 @@ use crate::{
 use alloc::{
     boxed::Box,
     collections::{BTreeSet, VecDeque},
-    format,
     string::{String, ToString},
     sync::Arc,
     vec,
@@ -146,7 +140,8 @@ const ENTITYID_SEDP_BUILTIN_SUBSCRIPTIONS_DETECTOR: EntityId =
     EntityId::new([0, 0, 0x04], BUILT_IN_READER_WITH_KEY);
 
 struct DcpsParticipantReaderHistoryCache {
-    participant_address: MpscSender<DcpsDomainParticipantMail>,
+    participant_handle: InstanceHandle,
+    dcps_sender: MpscSender<DcpsMail>,
 }
 
 impl HistoryCache for DcpsParticipantReaderHistoryCache {
@@ -154,12 +149,14 @@ impl HistoryCache for DcpsParticipantReaderHistoryCache {
         &mut self,
         cache_change: CacheChange,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        let dcps_sender = self.dcps_sender.clone();
         Box::pin(async move {
-            self.participant_address
-                .send(DcpsDomainParticipantMail::Message(
+            self.dcps_sender
+                .send(DcpsMail::Message(
                     MessageServiceMail::AddBuiltinParticipantsDetectorCacheChange {
                         cache_change,
-                        participant_address: self.participant_address.clone(),
+                        participant_handle: self.participant_handle,
+                        dcps_sender,
                     },
                 ))
                 .await
@@ -173,7 +170,8 @@ impl HistoryCache for DcpsParticipantReaderHistoryCache {
 }
 
 struct DcpsTopicsReaderHistoryCache {
-    participant_address: MpscSender<DcpsDomainParticipantMail>,
+    dcps_sender: MpscSender<DcpsMail>,
+    participant_handle: InstanceHandle,
 }
 
 impl HistoryCache for DcpsTopicsReaderHistoryCache {
@@ -181,10 +179,14 @@ impl HistoryCache for DcpsTopicsReaderHistoryCache {
         &mut self,
         cache_change: CacheChange,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        let participant_handle = self.participant_handle;
         Box::pin(async move {
-            self.participant_address
-                .send(DcpsDomainParticipantMail::Message(
-                    MessageServiceMail::AddBuiltinTopicsDetectorCacheChange { cache_change },
+            self.dcps_sender
+                .send(DcpsMail::Message(
+                    MessageServiceMail::AddBuiltinTopicsDetectorCacheChange {
+                        participant_handle,
+                        cache_change,
+                    },
                 ))
                 .await
                 .ok();
@@ -197,7 +199,8 @@ impl HistoryCache for DcpsTopicsReaderHistoryCache {
 }
 
 struct DcpsSubscriptionsReaderHistoryCache {
-    participant_address: MpscSender<DcpsDomainParticipantMail>,
+    participant_handle: InstanceHandle,
+    dcps_sender: MpscSender<DcpsMail>,
 }
 
 impl HistoryCache for DcpsSubscriptionsReaderHistoryCache {
@@ -205,12 +208,14 @@ impl HistoryCache for DcpsSubscriptionsReaderHistoryCache {
         &mut self,
         cache_change: CacheChange,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        let dcps_sender = self.dcps_sender.clone();
         Box::pin(async move {
-            self.participant_address
-                .send(DcpsDomainParticipantMail::Message(
+            self.dcps_sender
+                .send(DcpsMail::Message(
                     MessageServiceMail::AddBuiltinSubscriptionsDetectorCacheChange {
                         cache_change,
-                        participant_address: self.participant_address.clone(),
+                        participant_handle: self.participant_handle,
+                        dcps_sender,
                     },
                 ))
                 .await
@@ -224,7 +229,8 @@ impl HistoryCache for DcpsSubscriptionsReaderHistoryCache {
 }
 
 struct DcpsPublicationsReaderHistoryCache {
-    participant_address: MpscSender<DcpsDomainParticipantMail>,
+    dcps_sender: MpscSender<DcpsMail>,
+    participant_handle: InstanceHandle,
 }
 
 impl HistoryCache for DcpsPublicationsReaderHistoryCache {
@@ -232,12 +238,15 @@ impl HistoryCache for DcpsPublicationsReaderHistoryCache {
         &mut self,
         cache_change: CacheChange,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        let participant_handle = self.participant_handle;
+        let dcps_sender = self.dcps_sender.clone();
         Box::pin(async move {
-            self.participant_address
-                .send(DcpsDomainParticipantMail::Message(
+            self.dcps_sender
+                .send(DcpsMail::Message(
                     MessageServiceMail::AddBuiltinPublicationsDetectorCacheChange {
+                        participant_handle,
                         cache_change,
-                        participant_address: self.participant_address.clone(),
+                        dcps_sender,
                     },
                 ))
                 .await
@@ -294,14 +303,14 @@ where
         listener_sender: Option<MpscSender<ListenerMail>>,
         status_kind: Vec<StatusKind>,
         transport: RtpsTransportParticipant,
-        participant_sender: MpscSender<DcpsDomainParticipantMail>,
+        dcps_sender: MpscSender<DcpsMail>,
         clock_handle: R::ClockHandle,
         timer_handle: R::TimerHandle,
         spawner_handle: R::SpawnerHandle,
     ) -> Self {
         let guid = Guid::new(guid_prefix, ENTITYID_PARTICIPANT);
 
-        let participant_instance_handle = InstanceHandle::new(guid.into());
+        let participant_handle = InstanceHandle::new(guid.into());
 
         fn sedp_data_reader_qos() -> DataReaderQos {
             DataReaderQos {
@@ -347,18 +356,18 @@ where
         let mut topic_list = Vec::new();
 
         let spdp_topic_participant_handle = [
-            participant_instance_handle[0],
-            participant_instance_handle[1],
-            participant_instance_handle[2],
-            participant_instance_handle[3],
-            participant_instance_handle[4],
-            participant_instance_handle[5],
-            participant_instance_handle[6],
-            participant_instance_handle[7],
-            participant_instance_handle[8],
-            participant_instance_handle[9],
-            participant_instance_handle[10],
-            participant_instance_handle[11],
+            participant_handle[0],
+            participant_handle[1],
+            participant_handle[2],
+            participant_handle[3],
+            participant_handle[4],
+            participant_handle[5],
+            participant_handle[6],
+            participant_handle[7],
+            participant_handle[8],
+            participant_handle[9],
+            participant_handle[10],
+            participant_handle[11],
             0,
             0,
             0,
@@ -379,18 +388,18 @@ where
         topic_list.push(TopicDescriptionKind::Topic(spdp_topic_participant));
 
         let sedp_topic_topics_handle = [
-            participant_instance_handle[0],
-            participant_instance_handle[1],
-            participant_instance_handle[2],
-            participant_instance_handle[3],
-            participant_instance_handle[4],
-            participant_instance_handle[5],
-            participant_instance_handle[6],
-            participant_instance_handle[7],
-            participant_instance_handle[8],
-            participant_instance_handle[9],
-            participant_instance_handle[10],
-            participant_instance_handle[11],
+            participant_handle[0],
+            participant_handle[1],
+            participant_handle[2],
+            participant_handle[3],
+            participant_handle[4],
+            participant_handle[5],
+            participant_handle[6],
+            participant_handle[7],
+            participant_handle[8],
+            participant_handle[9],
+            participant_handle[10],
+            participant_handle[11],
             0,
             0,
             1,
@@ -410,18 +419,18 @@ where
         topic_list.push(TopicDescriptionKind::Topic(sedp_topic_topics));
 
         let sedp_topic_publications_handle = [
-            participant_instance_handle[0],
-            participant_instance_handle[1],
-            participant_instance_handle[2],
-            participant_instance_handle[3],
-            participant_instance_handle[4],
-            participant_instance_handle[5],
-            participant_instance_handle[6],
-            participant_instance_handle[7],
-            participant_instance_handle[8],
-            participant_instance_handle[9],
-            participant_instance_handle[10],
-            participant_instance_handle[11],
+            participant_handle[0],
+            participant_handle[1],
+            participant_handle[2],
+            participant_handle[3],
+            participant_handle[4],
+            participant_handle[5],
+            participant_handle[6],
+            participant_handle[7],
+            participant_handle[8],
+            participant_handle[9],
+            participant_handle[10],
+            participant_handle[11],
             0,
             0,
             2,
@@ -440,18 +449,18 @@ where
         topic_list.push(TopicDescriptionKind::Topic(sedp_topic_publications));
 
         let sedp_topic_subscriptions_handle = [
-            participant_instance_handle[0],
-            participant_instance_handle[1],
-            participant_instance_handle[2],
-            participant_instance_handle[3],
-            participant_instance_handle[4],
-            participant_instance_handle[5],
-            participant_instance_handle[6],
-            participant_instance_handle[7],
-            participant_instance_handle[8],
-            participant_instance_handle[9],
-            participant_instance_handle[10],
-            participant_instance_handle[11],
+            participant_handle[0],
+            participant_handle[1],
+            participant_handle[2],
+            participant_handle[3],
+            participant_handle[4],
+            participant_handle[5],
+            participant_handle[6],
+            participant_handle[7],
+            participant_handle[8],
+            participant_handle[9],
+            participant_handle[10],
+            participant_handle[11],
             0,
             0,
             3,
@@ -502,7 +511,8 @@ where
         let rtps_stateless_reader = RtpsStatelessReader::new(
             Guid::new(guid_prefix, ENTITYID_SPDP_BUILTIN_PARTICIPANT_READER),
             Box::new(DcpsParticipantReaderHistoryCache {
-                participant_address: participant_sender.clone(),
+                dcps_sender: dcps_sender.clone(),
+                participant_handle,
             }),
         );
 
@@ -520,7 +530,8 @@ where
         let dcps_topic_transport_reader = RtpsStatefulReader::new(
             Guid::new(guid_prefix, ENTITYID_SEDP_BUILTIN_TOPICS_DETECTOR),
             Box::new(DcpsTopicsReaderHistoryCache {
-                participant_address: participant_sender.clone(),
+                dcps_sender: dcps_sender.clone(),
+                participant_handle,
             }),
             ReliabilityKind::Reliable,
         );
@@ -539,7 +550,8 @@ where
         let dcps_publication_transport_reader = RtpsStatefulReader::new(
             Guid::new(guid_prefix, ENTITYID_SEDP_BUILTIN_PUBLICATIONS_DETECTOR),
             Box::new(DcpsPublicationsReaderHistoryCache {
-                participant_address: participant_sender.clone(),
+                dcps_sender: dcps_sender.clone(),
+                participant_handle,
             }),
             ReliabilityKind::Reliable,
         );
@@ -558,7 +570,8 @@ where
         let dcps_subscription_transport_reader = RtpsStatefulReader::new(
             Guid::new(guid_prefix, ENTITYID_SEDP_BUILTIN_SUBSCRIPTIONS_DETECTOR),
             Box::new(DcpsSubscriptionsReaderHistoryCache {
-                participant_address: participant_sender.clone(),
+                dcps_sender: dcps_sender.clone(),
+                participant_handle,
             }),
             ReliabilityKind::Reliable,
         );
@@ -581,18 +594,18 @@ where
             dcps_subscription_reader,
         ];
         let builtin_subscriber_handle = [
-            participant_instance_handle[0],
-            participant_instance_handle[1],
-            participant_instance_handle[2],
-            participant_instance_handle[3],
-            participant_instance_handle[4],
-            participant_instance_handle[5],
-            participant_instance_handle[6],
-            participant_instance_handle[7],
-            participant_instance_handle[8],
-            participant_instance_handle[9],
-            participant_instance_handle[10],
-            participant_instance_handle[11],
+            participant_handle[0],
+            participant_handle[1],
+            participant_handle[2],
+            participant_handle[3],
+            participant_handle[4],
+            participant_handle[5],
+            participant_handle[6],
+            participant_handle[7],
+            participant_handle[8],
+            participant_handle[9],
+            participant_handle[10],
+            participant_handle[11],
             0,
             0,
             0,
@@ -681,18 +694,18 @@ where
             dcps_subscriptions_writer,
         ];
         let builtin_publisher_handle = [
-            participant_instance_handle[0],
-            participant_instance_handle[1],
-            participant_instance_handle[2],
-            participant_instance_handle[3],
-            participant_instance_handle[4],
-            participant_instance_handle[5],
-            participant_instance_handle[6],
-            participant_instance_handle[7],
-            participant_instance_handle[8],
-            participant_instance_handle[9],
-            participant_instance_handle[10],
-            participant_instance_handle[11],
+            participant_handle[0],
+            participant_handle[1],
+            participant_handle[2],
+            participant_handle[3],
+            participant_handle[4],
+            participant_handle[5],
+            participant_handle[6],
+            participant_handle[7],
+            participant_handle[8],
+            participant_handle[9],
+            participant_handle[10],
+            participant_handle[11],
             0,
             0,
             0,
@@ -711,7 +724,7 @@ where
             domain_participant_qos,
             listener_sender,
             status_kind,
-            participant_instance_handle,
+            participant_handle,
             builtin_publisher,
             builtin_subscriber,
             topic_list,
@@ -732,12 +745,9 @@ where
         }
     }
 
-    fn get_participant_async(
-        &self,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
-    ) -> DomainParticipantAsync {
+    fn get_participant_async(&self, dcps_sender: MpscSender<DcpsMail>) -> DomainParticipantAsync {
         DomainParticipantAsync::new(
-            participant_address,
+            dcps_sender,
             self.domain_participant
                 .builtin_subscriber()
                 .status_condition
@@ -749,7 +759,7 @@ where
 
     fn get_subscriber_async(
         &self,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
+        dcps_sender: MpscSender<DcpsMail>,
         subscriber_handle: InstanceHandle,
     ) -> DdsResult<SubscriberAsync> {
         Ok(SubscriberAsync::new(
@@ -761,13 +771,13 @@ where
                 .ok_or(DdsError::AlreadyDeleted)?
                 .status_condition
                 .address(),
-            self.get_participant_async(participant_address),
+            self.get_participant_async(dcps_sender),
         ))
     }
 
     fn get_data_reader_async<Foo>(
         &self,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
+        dcps_sender: MpscSender<DcpsMail>,
         subscriber_handle: InstanceHandle,
         data_reader_handle: InstanceHandle,
     ) -> DdsResult<DataReaderAsync<Foo>> {
@@ -785,25 +795,25 @@ where
         Ok(DataReaderAsync::new(
             data_reader_handle,
             data_reader.status_condition.address(),
-            self.get_subscriber_async(participant_address.clone(), subscriber_handle)?,
-            self.get_topic_description_async(participant_address, data_reader.topic_name.clone())?,
+            self.get_subscriber_async(dcps_sender.clone(), subscriber_handle)?,
+            self.get_topic_description_async(dcps_sender, data_reader.topic_name.clone())?,
         ))
     }
 
     fn get_publisher_async(
         &self,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
+        dcps_sender: MpscSender<DcpsMail>,
         publisher_handle: InstanceHandle,
     ) -> DdsResult<PublisherAsync> {
         Ok(PublisherAsync::new(
             publisher_handle,
-            self.get_participant_async(participant_address),
+            self.get_participant_async(dcps_sender),
         ))
     }
 
     fn get_data_writer_async<Foo>(
         &self,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
+        dcps_sender: MpscSender<DcpsMail>,
         publisher_handle: InstanceHandle,
         data_writer_handle: InstanceHandle,
     ) -> DdsResult<DataWriterAsync<Foo>> {
@@ -821,14 +831,14 @@ where
         Ok(DataWriterAsync::new(
             data_writer_handle,
             data_writer.status_condition.address(),
-            self.get_publisher_async(participant_address.clone(), publisher_handle)?,
-            self.get_topic_description_async(participant_address, data_writer.topic_name.clone())?,
+            self.get_publisher_async(dcps_sender.clone(), publisher_handle)?,
+            self.get_topic_description_async(dcps_sender, data_writer.topic_name.clone())?,
         ))
     }
 
     fn get_topic_description_async(
         &self,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
+        dcps_sender: MpscSender<DcpsMail>,
         topic_name: String,
     ) -> DdsResult<TopicDescriptionAsync> {
         match self
@@ -843,7 +853,7 @@ where
                     topic.status_condition.address(),
                     topic.type_name.clone(),
                     topic_name,
-                    self.get_participant_async(participant_address),
+                    self.get_participant_async(dcps_sender),
                 )))
             }
             Some(TopicDescriptionKind::ContentFilteredTopic(t)) => {
@@ -859,7 +869,7 @@ where
                         related_topic.status_condition.address(),
                         related_topic.type_name.clone(),
                         t.related_topic_name.clone(),
-                        self.get_participant_async(participant_address),
+                        self.get_participant_async(dcps_sender),
                     );
                     Ok(TopicDescriptionAsync::ContentFilteredTopic(
                         ContentFilteredTopicAsync::new(name, topic),
@@ -880,2618 +890,8 @@ where
         &self.domain_participant.builtin_subscriber.status_condition
     }
 
-    #[tracing::instrument(skip(self))]
-    pub async fn get_inconsistent_topic_status(
-        &mut self,
-        topic_name: String,
-    ) -> DdsResult<InconsistentTopicStatus> {
-        let Some(TopicDescriptionKind::Topic(topic)) = self
-            .domain_participant
-            .topic_description_list
-            .iter_mut()
-            .find(|x| x.topic_name() == topic_name)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let status = topic.inconsistent_topic_status.clone();
-        topic.inconsistent_topic_status.total_count_change = 0;
-        topic
-            .status_condition
-            .send_actor_mail(DcpsStatusConditionMail::RemoveCommunicationState {
-                state: StatusKind::InconsistentTopic,
-            })
-            .await;
-
-        Ok(status)
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn set_topic_qos(
-        &mut self,
-        topic_name: String,
-        topic_qos: QosKind<TopicQos>,
-    ) -> DdsResult<()> {
-        let qos = match topic_qos {
-            QosKind::Default => self.domain_participant.default_topic_qos.clone(),
-            QosKind::Specific(q) => q,
-        };
-        let Some(TopicDescriptionKind::Topic(topic)) = self
-            .domain_participant
-            .topic_description_list
-            .iter_mut()
-            .find(|x| x.topic_name() == topic_name)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        qos.is_consistent()?;
-
-        if topic.enabled
-            && (topic.qos.durability != qos.durability
-                || topic.qos.liveliness != qos.liveliness
-                || topic.qos.reliability != qos.reliability
-                || topic.qos.destination_order != qos.destination_order
-                || topic.qos.history != qos.history
-                || topic.qos.resource_limits != qos.resource_limits
-                || topic.qos.ownership != qos.ownership)
-        {
-            return Err(DdsError::ImmutablePolicy);
-        }
-
-        topic.qos = qos;
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn get_topic_qos(&mut self, topic_name: String) -> DdsResult<TopicQos> {
-        let Some(TopicDescriptionKind::Topic(topic)) = self
-            .domain_participant
-            .topic_description_list
-            .iter_mut()
-            .find(|x| x.topic_name() == topic_name)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        Ok(topic.qos.clone())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub async fn enable_topic(
-        &mut self,
-        topic_name: String,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
-    ) -> DdsResult<()> {
-        let Some(TopicDescriptionKind::Topic(topic)) = self
-            .domain_participant
-            .topic_description_list
-            .iter_mut()
-            .find(|x| x.topic_name() == topic_name)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        if !topic.enabled {
-            topic.enabled = true;
-            self.announce_topic(topic_name, participant_address).await;
-        }
-
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn get_type_support(&mut self, topic_name: String) -> DdsResult<Arc<DynamicType>> {
-        let Some(TopicDescriptionKind::Topic(topic)) = self
-            .domain_participant
-            .topic_description_list
-            .iter_mut()
-            .find(|x| x.topic_name() == topic_name)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        Ok(topic.type_support.clone())
-    }
-
-    #[tracing::instrument(skip(self, dcps_listener))]
-    pub fn create_user_defined_publisher(
-        &mut self,
-        qos: QosKind<PublisherQos>,
-        dcps_listener: Option<DcpsPublisherListener>,
-        mask: Vec<StatusKind>,
-    ) -> DdsResult<InstanceHandle> {
-        let publisher_qos = match qos {
-            QosKind::Default => self.domain_participant.default_publisher_qos.clone(),
-            QosKind::Specific(q) => q,
-        };
-
-        let publisher_handle = InstanceHandle::new([
-            self.domain_participant.instance_handle[0],
-            self.domain_participant.instance_handle[1],
-            self.domain_participant.instance_handle[2],
-            self.domain_participant.instance_handle[3],
-            self.domain_participant.instance_handle[4],
-            self.domain_participant.instance_handle[5],
-            self.domain_participant.instance_handle[6],
-            self.domain_participant.instance_handle[7],
-            self.domain_participant.instance_handle[8],
-            self.domain_participant.instance_handle[9],
-            self.domain_participant.instance_handle[10],
-            self.domain_participant.instance_handle[11],
-            self.publisher_counter,
-            0,
-            0,
-            USER_DEFINED_WRITER_GROUP,
-        ]);
-        self.publisher_counter += 1;
-        let data_writer_list = Default::default();
-        let listener_sender = dcps_listener.map(|l| l.spawn::<R>(&self.spawner_handle));
-        let mut publisher = PublisherEntity::new(
-            publisher_qos,
-            publisher_handle,
-            data_writer_list,
-            listener_sender,
-            mask,
-        );
-
-        if self.domain_participant.enabled
-            && self
-                .domain_participant
-                .qos
-                .entity_factory
-                .autoenable_created_entities
-        {
-            publisher.enabled = true;
-        }
-
-        self.domain_participant
-            .user_defined_publisher_list
-            .push(publisher);
-
-        Ok(publisher_handle)
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn delete_user_defined_publisher(
-        &mut self,
-        participant_handle: InstanceHandle,
-        publisher_handle: InstanceHandle,
-    ) -> DdsResult<()> {
-        if participant_handle != self.domain_participant.instance_handle {
-            return Err(DdsError::PreconditionNotMet(
-                "Publisher can only be deleted from its parent participant".to_string(),
-            ));
-        }
-        let Some(publisher) = self
-            .domain_participant
-            .user_defined_publisher_list
-            .iter()
-            .find(|x| x.instance_handle == publisher_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        if !publisher.data_writer_list.is_empty() {
-            return Err(DdsError::PreconditionNotMet(
-                "Publisher still contains data writers".to_string(),
-            ));
-        }
-        let Some(_) = self.domain_participant.remove_publisher(&publisher_handle) else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self, dcps_listener))]
-    pub fn create_user_defined_subscriber(
-        &mut self,
-        qos: QosKind<SubscriberQos>,
-        dcps_listener: Option<DcpsSubscriberListener>,
-        mask: Vec<StatusKind>,
-    ) -> DdsResult<(InstanceHandle, ActorAddress<DcpsStatusCondition>)> {
-        let subscriber_qos = match qos {
-            QosKind::Default => self.domain_participant.default_subscriber_qos.clone(),
-            QosKind::Specific(q) => q,
-        };
-        let status_condition =
-            Actor::spawn::<R>(DcpsStatusCondition::default(), &self.spawner_handle);
-        let subscriber_status_condition_address = status_condition.address();
-        let subscriber_handle = InstanceHandle::new([
-            self.domain_participant.instance_handle[0],
-            self.domain_participant.instance_handle[1],
-            self.domain_participant.instance_handle[2],
-            self.domain_participant.instance_handle[3],
-            self.domain_participant.instance_handle[4],
-            self.domain_participant.instance_handle[5],
-            self.domain_participant.instance_handle[6],
-            self.domain_participant.instance_handle[7],
-            self.domain_participant.instance_handle[8],
-            self.domain_participant.instance_handle[9],
-            self.domain_participant.instance_handle[10],
-            self.domain_participant.instance_handle[11],
-            self.subscriber_counter,
-            0,
-            0,
-            USER_DEFINED_READER_GROUP,
-        ]);
-        self.subscriber_counter += 1;
-
-        let listener_mask = mask.to_vec();
-        let data_reader_list = Default::default();
-
-        let listener_sender = dcps_listener.map(|l| l.spawn::<R>(&self.spawner_handle));
-        let mut subscriber = SubscriberEntity::new(
-            subscriber_handle,
-            subscriber_qos,
-            data_reader_list,
-            status_condition,
-            listener_sender,
-            listener_mask,
-        );
-
-        if self.domain_participant.enabled
-            && self
-                .domain_participant
-                .qos
-                .entity_factory
-                .autoenable_created_entities
-        {
-            subscriber.enabled = true;
-        }
-
-        self.domain_participant
-            .user_defined_subscriber_list
-            .push(subscriber);
-
-        Ok((subscriber_handle, subscriber_status_condition_address))
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn delete_user_defined_subscriber(
-        &mut self,
-        participant_handle: InstanceHandle,
-        subscriber_handle: InstanceHandle,
-    ) -> DdsResult<()> {
-        if self.domain_participant.instance_handle != participant_handle {
-            return Err(DdsError::PreconditionNotMet(
-                "Subscriber can only be deleted from its parent participant".to_string(),
-            ));
-        }
-
-        let Some(subscriber) = self
-            .domain_participant
-            .user_defined_subscriber_list
-            .iter()
-            .find(|x| x.instance_handle == subscriber_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        if !subscriber.data_reader_list.is_empty() {
-            return Err(DdsError::PreconditionNotMet(
-                "Subscriber still contains data readers".to_string(),
-            ));
-        }
-        let Some(_) = self
-            .domain_participant
-            .remove_subscriber(&subscriber_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[tracing::instrument(skip(self, dcps_listener, type_support))]
-    pub async fn create_topic(
-        &mut self,
-        topic_name: String,
-        type_name: String,
-        qos: QosKind<TopicQos>,
-        dcps_listener: Option<DcpsTopicListener>,
-        mask: Vec<StatusKind>,
-        type_support: Arc<DynamicType>,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
-    ) -> DdsResult<(InstanceHandle, ActorAddress<DcpsStatusCondition>)> {
-        if self
-            .domain_participant
-            .topic_description_list
-            .iter()
-            .any(|x| x.topic_name() == topic_name)
-        {
-            return Err(DdsError::PreconditionNotMet(format!(
-                "Topic with name {topic_name} already exists.
-         To access this topic call the lookup_topicdescription method.",
-            )));
-        }
-
-        let status_condition =
-            Actor::spawn::<R>(DcpsStatusCondition::default(), &self.spawner_handle);
-        let topic_status_condition_address = status_condition.address();
-        let qos = match qos {
-            QosKind::Default => self.domain_participant.default_topic_qos.clone(),
-            QosKind::Specific(q) => q,
-        };
-
-        let topic_handle = InstanceHandle::new([
-            self.domain_participant.instance_handle[0],
-            self.domain_participant.instance_handle[1],
-            self.domain_participant.instance_handle[2],
-            self.domain_participant.instance_handle[3],
-            self.domain_participant.instance_handle[4],
-            self.domain_participant.instance_handle[5],
-            self.domain_participant.instance_handle[6],
-            self.domain_participant.instance_handle[7],
-            self.domain_participant.instance_handle[8],
-            self.domain_participant.instance_handle[9],
-            self.domain_participant.instance_handle[10],
-            self.domain_participant.instance_handle[11],
-            0,
-            self.topic_counter.to_ne_bytes()[0],
-            self.topic_counter.to_ne_bytes()[1],
-            USER_DEFINED_TOPIC,
-        ]);
-        self.topic_counter += 1;
-        let listener_sender = dcps_listener.map(|l| l.spawn::<R>(&self.spawner_handle));
-        let topic = TopicEntity::new(
-            qos,
-            type_name,
-            topic_name.clone(),
-            topic_handle,
-            status_condition,
-            listener_sender,
-            mask,
-            type_support,
-        );
-
-        self.domain_participant
-            .topic_description_list
-            .push(TopicDescriptionKind::Topic(topic));
-
-        if self.domain_participant.enabled
-            && self
-                .domain_participant
-                .qos
-                .entity_factory
-                .autoenable_created_entities
-        {
-            self.enable_topic(topic_name, participant_address).await?;
-        }
-
-        Ok((topic_handle, topic_status_condition_address))
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn delete_user_defined_topic(
-        &mut self,
-        participant_handle: InstanceHandle,
-        topic_name: String,
-    ) -> DdsResult<()> {
-        if self.domain_participant.instance_handle != participant_handle {
-            return Err(DdsError::PreconditionNotMet(
-                "Topic can only be deleted from its parent participant".to_string(),
-            ));
-        }
-
-        if BUILT_IN_TOPIC_NAME_LIST.contains(&topic_name.as_str()) {
-            return Ok(());
-        }
-
-        let Some(TopicDescriptionKind::Topic(topic)) = self
-            .domain_participant
-            .topic_description_list
-            .iter()
-            .find(|x| x.topic_name() == topic_name)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        if Arc::strong_count(&topic.type_support) > 1 {
-            return Err(DdsError::PreconditionNotMet(
-                "Topic still attached to some data writer or data reader".to_string(),
-            ));
-        }
-
-        self.domain_participant
-            .topic_description_list
-            .retain(|x| x.topic_name() != topic_name);
-
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub async fn create_content_filtered_topic(
-        &mut self,
-        participant_handle: InstanceHandle,
-        name: String,
-        related_topic_name: String,
-        filter_expression: String,
-        expression_parameters: Vec<String>,
-    ) -> DdsResult<InstanceHandle> {
-        if !self
-            .domain_participant
-            .topic_description_list
-            .iter()
-            .any(|x| x.topic_name() == related_topic_name)
-        {
-            return Err(DdsError::PreconditionNotMet(format!(
-                "Related topic with name {related_topic_name} does not exist."
-            )));
-        }
-
-        let topic_handle = InstanceHandle::new([
-            self.domain_participant.instance_handle[0],
-            self.domain_participant.instance_handle[1],
-            self.domain_participant.instance_handle[2],
-            self.domain_participant.instance_handle[3],
-            self.domain_participant.instance_handle[4],
-            self.domain_participant.instance_handle[5],
-            self.domain_participant.instance_handle[6],
-            self.domain_participant.instance_handle[7],
-            self.domain_participant.instance_handle[8],
-            self.domain_participant.instance_handle[9],
-            self.domain_participant.instance_handle[10],
-            self.domain_participant.instance_handle[11],
-            0,
-            self.topic_counter.to_ne_bytes()[0],
-            self.topic_counter.to_ne_bytes()[1],
-            USER_DEFINED_TOPIC,
-        ]);
-        self.topic_counter += 1;
-
-        let topic = ContentFilteredTopicEntity::new(
-            name,
-            related_topic_name,
-            filter_expression,
-            expression_parameters,
-        );
-        self.domain_participant
-            .topic_description_list
-            .push(TopicDescriptionKind::ContentFilteredTopic(topic));
-
-        Ok(topic_handle)
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn delete_content_filtered_topic(
-        &mut self,
-        participant_handle: InstanceHandle,
-        name: String,
-    ) -> DdsResult<()> {
-        Ok(())
-    }
-
-    #[allow(clippy::type_complexity)]
-    #[tracing::instrument(skip(self, type_support))]
-    pub fn find_topic(
-        &mut self,
-        topic_name: String,
-        type_support: Arc<DynamicType>,
-    ) -> DdsResult<Option<(InstanceHandle, ActorAddress<DcpsStatusCondition>, String)>> {
-        if let Some(TopicDescriptionKind::Topic(topic)) = self
-            .domain_participant
-            .topic_description_list
-            .iter()
-            .find(|x| x.topic_name() == topic_name)
-        {
-            Ok(Some((
-                topic.instance_handle,
-                topic.status_condition.address(),
-                topic.type_name.clone(),
-            )))
-        } else {
-            if let Some(discovered_topic_data) = self.domain_participant.find_topic(&topic_name) {
-                let qos = TopicQos {
-                    topic_data: discovered_topic_data.topic_data().clone(),
-                    durability: discovered_topic_data.durability().clone(),
-                    deadline: discovered_topic_data.deadline().clone(),
-                    latency_budget: discovered_topic_data.latency_budget().clone(),
-                    liveliness: discovered_topic_data.liveliness().clone(),
-                    reliability: discovered_topic_data.reliability().clone(),
-                    destination_order: discovered_topic_data.destination_order().clone(),
-                    history: discovered_topic_data.history().clone(),
-                    resource_limits: discovered_topic_data.resource_limits().clone(),
-                    transport_priority: discovered_topic_data.transport_priority().clone(),
-                    lifespan: discovered_topic_data.lifespan().clone(),
-                    ownership: discovered_topic_data.ownership().clone(),
-                    representation: discovered_topic_data.representation().clone(),
-                };
-                let type_name = discovered_topic_data.type_name.clone();
-                let topic_handle = InstanceHandle::new([
-                    self.domain_participant.instance_handle[0],
-                    self.domain_participant.instance_handle[1],
-                    self.domain_participant.instance_handle[2],
-                    self.domain_participant.instance_handle[3],
-                    self.domain_participant.instance_handle[4],
-                    self.domain_participant.instance_handle[5],
-                    self.domain_participant.instance_handle[6],
-                    self.domain_participant.instance_handle[7],
-                    self.domain_participant.instance_handle[8],
-                    self.domain_participant.instance_handle[9],
-                    self.domain_participant.instance_handle[10],
-                    self.domain_participant.instance_handle[11],
-                    0,
-                    self.topic_counter.to_ne_bytes()[0],
-                    self.topic_counter.to_ne_bytes()[1],
-                    USER_DEFINED_TOPIC,
-                ]);
-                self.topic_counter += 1;
-                let status_condition =
-                    Actor::spawn::<R>(DcpsStatusCondition::default(), &self.spawner_handle);
-                let mut topic = TopicEntity::new(
-                    qos,
-                    type_name.clone(),
-                    topic_name.clone(),
-                    topic_handle,
-                    status_condition,
-                    None,
-                    vec![],
-                    type_support,
-                );
-                topic.enabled = true;
-                let topic_status_condition_address = topic.status_condition.address();
-
-                match self
-                    .domain_participant
-                    .topic_description_list
-                    .iter_mut()
-                    .find(|x| x.topic_name() == topic.topic_name)
-                {
-                    Some(TopicDescriptionKind::Topic(x)) => *x = topic,
-                    Some(TopicDescriptionKind::ContentFilteredTopic(_)) => {
-                        return Err(DdsError::IllegalOperation);
-                    }
-                    None => self
-                        .domain_participant
-                        .topic_description_list
-                        .push(TopicDescriptionKind::Topic(topic)),
-                }
-
-                return Ok(Some((
-                    topic_handle,
-                    topic_status_condition_address,
-                    type_name,
-                )));
-            }
-            Ok(None)
-        }
-    }
-
-    #[allow(clippy::type_complexity)]
-    #[tracing::instrument(skip(self))]
-    pub fn lookup_topicdescription(
-        &mut self,
-        topic_name: String,
-    ) -> DdsResult<Option<(String, InstanceHandle, ActorAddress<DcpsStatusCondition>)>> {
-        if let Some(TopicDescriptionKind::Topic(topic)) = self
-            .domain_participant
-            .topic_description_list
-            .iter()
-            .find(|x| x.topic_name() == topic_name)
-        {
-            Ok(Some((
-                topic.type_name.clone(),
-                topic.instance_handle,
-                topic.status_condition.address(),
-            )))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Ignore participant with the specified [`handle`](InstanceHandle).
-    #[tracing::instrument(skip(self))]
-    pub async fn ignore_participant(&mut self, handle: InstanceHandle) -> DdsResult<()> {
-        // Check enabled
-        if !self.domain_participant.enabled {
-            return Err(DdsError::NotEnabled);
-        }
-
-        // Add to ignored participants
-        if !self.domain_participant.ignored_participants.insert(handle) {
-            // Already ignored
-            return Ok(());
-        }
-
-        // Remove participant
-        self.remove_discovered_participant(handle).await;
-
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn ignore_publication(&mut self, handle: InstanceHandle) -> DdsResult<()> {
-        if !self.domain_participant.enabled {
-            return Err(DdsError::NotEnabled);
-        }
-
-        self.domain_participant.ignored_publications.insert(handle);
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn ignore_subscription(&mut self, handle: InstanceHandle) -> DdsResult<()> {
-        if !self.domain_participant.enabled {
-            return Err(DdsError::NotEnabled);
-        }
-
-        self.domain_participant.ignored_subscriptions.insert(handle);
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub async fn delete_participant_contained_entities(&mut self) -> DdsResult<()> {
-        let deleted_publisher_list: Vec<PublisherEntity> = self
-            .domain_participant
-            .user_defined_publisher_list
-            .drain(..)
-            .collect();
-        for mut publisher in deleted_publisher_list {
-            for data_writer in publisher.data_writer_list.drain(..) {
-                self.announce_deleted_data_writer(data_writer).await;
-            }
-        }
-
-        let deleted_subscriber_list: Vec<SubscriberEntity> = self
-            .domain_participant
-            .user_defined_subscriber_list
-            .drain(..)
-            .collect();
-        for mut subscriber in deleted_subscriber_list {
-            for data_reader in subscriber.data_reader_list.drain(..) {
-                self.announce_deleted_data_reader(data_reader).await;
-            }
-        }
-
-        self.domain_participant
-            .topic_description_list
-            .retain(|x| BUILT_IN_TOPIC_NAME_LIST.contains(&x.topic_name()));
-
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn set_default_publisher_qos(&mut self, qos: QosKind<PublisherQos>) -> DdsResult<()> {
-        let qos = match qos {
-            QosKind::Default => PublisherQos::default(),
-            QosKind::Specific(q) => q,
-        };
-
-        self.domain_participant.default_publisher_qos = qos;
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn get_default_publisher_qos(&mut self) -> DdsResult<PublisherQos> {
-        Ok(self.domain_participant.default_publisher_qos.clone())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn set_default_subscriber_qos(&mut self, qos: QosKind<SubscriberQos>) -> DdsResult<()> {
-        let qos = match qos {
-            QosKind::Default => SubscriberQos::default(),
-            QosKind::Specific(q) => q,
-        };
-
-        self.domain_participant.default_subscriber_qos = qos;
-
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn get_default_subscriber_qos(&mut self) -> DdsResult<SubscriberQos> {
-        Ok(self.domain_participant.default_subscriber_qos.clone())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn set_default_topic_qos(&mut self, qos: QosKind<TopicQos>) -> DdsResult<()> {
-        let qos = match qos {
-            QosKind::Default => TopicQos::default(),
-            QosKind::Specific(q) => {
-                if q.is_consistent().is_ok() {
-                    q
-                } else {
-                    return Err(DdsError::InconsistentPolicy);
-                }
-            }
-        };
-
-        qos.is_consistent()?;
-        self.domain_participant.default_topic_qos = qos;
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn get_default_topic_qos(&self) -> DdsResult<TopicQos> {
-        Ok(self.domain_participant.default_topic_qos.clone())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn get_discovered_participants(&mut self) -> DdsResult<Vec<InstanceHandle>> {
-        Ok(self
-            .domain_participant
-            .discovered_participant_list
-            .iter()
-            .map(|p| InstanceHandle::new(p.dds_participant_data.key().value))
-            .collect())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn get_discovered_participant_data(
-        &mut self,
-        participant_handle: InstanceHandle,
-    ) -> DdsResult<ParticipantBuiltinTopicData> {
-        let Some(handle) = self
-            .domain_participant
-            .discovered_participant_list
-            .iter()
-            .find(|p| &p.dds_participant_data.key().value == participant_handle.as_ref())
-        else {
-            return Err(DdsError::BadParameter);
-        };
-        Ok(handle.dds_participant_data.clone())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn get_discovered_topics(&mut self) -> DdsResult<Vec<InstanceHandle>> {
-        Ok(self
-            .domain_participant
-            .discovered_topic_list
-            .iter()
-            .map(|x| InstanceHandle::new(x.key().value))
-            .collect())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn get_discovered_topic_data(
-        &mut self,
-        topic_handle: InstanceHandle,
-    ) -> DdsResult<TopicBuiltinTopicData> {
-        let Some(handle) = self
-            .domain_participant
-            .get_discovered_topic_data(&topic_handle)
-        else {
-            return Err(DdsError::PreconditionNotMet(String::from(
-                "Topic with this handle not discovered",
-            )));
-        };
-
-        Ok(handle.clone())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn get_current_time(&mut self) -> Time {
-        self.clock_handle.now()
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub async fn set_domain_participant_qos(
-        &mut self,
-        qos: QosKind<DomainParticipantQos>,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
-    ) -> DdsResult<()> {
-        let qos = match qos {
-            QosKind::Default => DomainParticipantQos::default(),
-            QosKind::Specific(q) => q,
-        };
-
-        self.domain_participant.qos = qos;
-        if self.domain_participant.enabled {
-            self.announce_participant(participant_address).await;
-        }
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn get_domain_participant_qos(&mut self) -> DdsResult<DomainParticipantQos> {
-        Ok(self.domain_participant.qos.clone())
-    }
-
-    #[tracing::instrument(skip(self, dcps_listener))]
-    pub fn set_domain_participant_listener(
-        &mut self,
-        dcps_listener: Option<DcpsDomainParticipantListener>,
-        status_kind: Vec<StatusKind>,
-    ) -> DdsResult<()> {
-        let listener_sender = dcps_listener.map(|l| l.spawn::<R>(&self.spawner_handle));
-        self.domain_participant.listener_sender = listener_sender;
-        self.domain_participant.listener_mask = status_kind;
-
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub async fn enable_domain_participant(
-        &mut self,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
-    ) -> DdsResult<()> {
-        if !self.domain_participant.enabled {
-            for t in &mut self.domain_participant.topic_description_list {
-                if let TopicDescriptionKind::Topic(t) = t {
-                    t.enabled = true;
-                }
-            }
-            for dw in &mut self.domain_participant.builtin_publisher.data_writer_list {
-                dw.enabled = true;
-            }
-            self.domain_participant.builtin_publisher.enabled = true;
-
-            for dr in &mut self.domain_participant.builtin_subscriber.data_reader_list {
-                dr.enabled = true;
-            }
-            self.domain_participant.builtin_subscriber.enabled = true;
-            self.domain_participant.enabled = true;
-
-            self.announce_participant(participant_address).await;
-        }
-
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn is_participant_empty(&mut self) -> bool {
-        self.domain_participant.is_empty()
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[tracing::instrument(skip(self, dcps_listener, domain_participant_address))]
-    pub async fn create_data_reader(
-        &mut self,
-        subscriber_handle: InstanceHandle,
-        topic_name: String,
-        qos: QosKind<DataReaderQos>,
-        dcps_listener: Option<DcpsDataReaderListener>,
-        mask: Vec<StatusKind>,
-        domain_participant_address: MpscSender<DcpsDomainParticipantMail>,
-    ) -> DdsResult<(InstanceHandle, ActorAddress<DcpsStatusCondition>)> {
-        struct UserDefinedReaderHistoryCache {
-            domain_participant_address: MpscSender<DcpsDomainParticipantMail>,
-            subscriber_handle: InstanceHandle,
-            data_reader_handle: InstanceHandle,
-        }
-
-        impl HistoryCache for UserDefinedReaderHistoryCache {
-            fn add_change(
-                &mut self,
-                cache_change: CacheChange,
-            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-                Box::pin(async move {
-                    self.domain_participant_address
-                        .send(DcpsDomainParticipantMail::Message(
-                            MessageServiceMail::AddCacheChange {
-                                participant_address: self.domain_participant_address.clone(),
-                                cache_change,
-                                subscriber_handle: self.subscriber_handle,
-                                data_reader_handle: self.data_reader_handle,
-                            },
-                        ))
-                        .await
-                        .ok();
-                })
-            }
-
-            fn remove_change(
-                &mut self,
-                _sequence_number: i64,
-            ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-                todo!()
-            }
-        }
-
-        let Some(topic) = self
-            .domain_participant
-            .topic_description_list
-            .iter()
-            .find(|x| x.topic_name() == topic_name)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        let topic = match topic {
-            TopicDescriptionKind::Topic(t) => t,
-            TopicDescriptionKind::ContentFilteredTopic(content_filtered_topic) => {
-                if let Some(TopicDescriptionKind::Topic(topic)) = self
-                    .domain_participant
-                    .topic_description_list
-                    .iter()
-                    .find(|x| x.topic_name() == content_filtered_topic.related_topic_name)
-                {
-                    topic
-                } else {
-                    return Err(DdsError::AlreadyDeleted);
-                }
-            }
-        };
-
-        let topic_kind = get_topic_kind(topic.type_support.as_ref());
-
-        let type_support = topic.type_support.clone();
-        let Some(subscriber) = self
-            .domain_participant
-            .user_defined_subscriber_list
-            .iter_mut()
-            .find(|x| x.instance_handle == subscriber_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        let qos = match qos {
-            QosKind::Default => subscriber.default_data_reader_qos.clone(),
-            QosKind::Specific(q) => {
-                if q.is_consistent().is_ok() {
-                    q
-                } else {
-                    return Err(DdsError::InconsistentPolicy);
-                }
-            }
-        };
-
-        let entity_kind = match topic_kind {
-            TopicKind::NoKey => USER_DEFINED_READER_NO_KEY,
-            TopicKind::WithKey => USER_DEFINED_READER_WITH_KEY,
-        };
-        let entity_id = EntityId::new(
-            [
-                subscriber.instance_handle[12],
-                self.reader_counter.to_ne_bytes()[0],
-                self.reader_counter.to_ne_bytes()[1],
-            ],
-            entity_kind,
-        );
-        let reader_handle = InstanceHandle::new([
-            self.domain_participant.instance_handle[0],
-            self.domain_participant.instance_handle[1],
-            self.domain_participant.instance_handle[2],
-            self.domain_participant.instance_handle[3],
-            self.domain_participant.instance_handle[4],
-            self.domain_participant.instance_handle[5],
-            self.domain_participant.instance_handle[6],
-            self.domain_participant.instance_handle[7],
-            self.domain_participant.instance_handle[8],
-            self.domain_participant.instance_handle[9],
-            self.domain_participant.instance_handle[10],
-            self.domain_participant.instance_handle[11],
-            entity_id.entity_key()[0],
-            entity_id.entity_key()[1],
-            entity_id.entity_key()[2],
-            entity_id.entity_kind(),
-        ]);
-        self.reader_counter += 1;
-        let reliablity_kind = match qos.reliability.kind {
-            ReliabilityQosPolicyKind::BestEffort => ReliabilityKind::BestEffort,
-            ReliabilityQosPolicyKind::Reliable => ReliabilityKind::Reliable,
-        };
-        let guid_prefix = Guid::from(*self.domain_participant.instance_handle.as_ref()).prefix();
-        let guid = Guid::new(guid_prefix, entity_id);
-
-        let transport_reader = TransportReaderKind::Stateful(RtpsStatefulReader::new(
-            guid,
-            Box::new(UserDefinedReaderHistoryCache {
-                domain_participant_address: domain_participant_address.clone(),
-                subscriber_handle: subscriber.instance_handle,
-                data_reader_handle: reader_handle,
-            }),
-            reliablity_kind,
-        ));
-
-        let status_condition =
-            Actor::spawn::<R>(DcpsStatusCondition::default(), &self.spawner_handle);
-        let reader_status_condition_address = status_condition.address();
-        let listener_mask = mask.to_vec();
-        let listener_sender = dcps_listener.map(|l| l.spawn::<R>(&self.spawner_handle));
-        let data_reader = DataReaderEntity::new(
-            reader_handle,
-            qos,
-            topic_name,
-            type_support,
-            status_condition,
-            listener_sender,
-            listener_mask,
-            transport_reader,
-        );
-
-        let data_reader_handle = data_reader.instance_handle;
-
-        subscriber.data_reader_list.push(data_reader);
-
-        if subscriber.enabled && subscriber.qos.entity_factory.autoenable_created_entities {
-            self.enable_data_reader(
-                subscriber_handle,
-                data_reader_handle,
-                domain_participant_address,
-            )
-            .await?;
-        }
-        Ok((data_reader_handle, reader_status_condition_address))
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub async fn delete_data_reader(
-        &mut self,
-        subscriber_handle: InstanceHandle,
-        datareader_handle: InstanceHandle,
-    ) -> DdsResult<()> {
-        let Some(subscriber) = self
-            .domain_participant
-            .user_defined_subscriber_list
-            .iter_mut()
-            .find(|x: &&mut SubscriberEntity| x.instance_handle == subscriber_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        if let Some(index) = subscriber
-            .data_reader_list
-            .iter()
-            .position(|x| x.instance_handle == datareader_handle)
-        {
-            let data_reader = subscriber.data_reader_list.remove(index);
-            self.announce_deleted_data_reader(data_reader).await;
-        } else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        Ok(())
-    }
-
-    #[allow(clippy::type_complexity)]
-    #[tracing::instrument(skip(self))]
-    pub fn lookup_data_reader(
-        &mut self,
-        subscriber_handle: InstanceHandle,
-        topic_name: String,
-    ) -> DdsResult<Option<(InstanceHandle, ActorAddress<DcpsStatusCondition>)>> {
-        if !self
-            .domain_participant
-            .topic_description_list
-            .iter()
-            .any(|x| x.topic_name() == topic_name)
-        {
-            return Err(DdsError::BadParameter);
-        }
-
-        // Built-in subscriber is identified by the handle of the participant itself
-        if self.domain_participant.instance_handle == subscriber_handle {
-            Ok(self
-                .domain_participant
-                .builtin_subscriber
-                .data_reader_list
-                .iter_mut()
-                .find(|dr| dr.topic_name == topic_name)
-                .map(|x| (x.instance_handle, x.status_condition.address())))
-        } else {
-            let Some(s) = self
-                .domain_participant
-                .user_defined_subscriber_list
-                .iter_mut()
-                .find(|x| x.instance_handle == subscriber_handle)
-            else {
-                return Err(DdsError::AlreadyDeleted);
-            };
-            Ok(s.data_reader_list
-                .iter_mut()
-                .find(|dr| dr.topic_name == topic_name)
-                .map(|x| (x.instance_handle, x.status_condition.address())))
-        }
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn set_default_data_reader_qos(
-        &mut self,
-        subscriber_handle: InstanceHandle,
-        qos: QosKind<DataReaderQos>,
-    ) -> DdsResult<()> {
-        let Some(subscriber) = self
-            .domain_participant
-            .user_defined_subscriber_list
-            .iter_mut()
-            .find(|x| x.instance_handle == subscriber_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let qos = match qos {
-            QosKind::Default => DataReaderQos::default(),
-            QosKind::Specific(q) => q,
-        };
-        qos.is_consistent()?;
-        subscriber.default_data_reader_qos = qos;
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn get_default_data_reader_qos(
-        &mut self,
-        subscriber_handle: InstanceHandle,
-    ) -> DdsResult<DataReaderQos> {
-        let Some(subscriber) = self
-            .domain_participant
-            .user_defined_subscriber_list
-            .iter_mut()
-            .find(|x| x.instance_handle == subscriber_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        Ok(subscriber.default_data_reader_qos.clone())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn set_subscriber_qos(
-        &mut self,
-        subscriber_handle: InstanceHandle,
-        qos: QosKind<SubscriberQos>,
-    ) -> DdsResult<()> {
-        let qos = match qos {
-            QosKind::Default => self.domain_participant.default_subscriber_qos.clone(),
-            QosKind::Specific(q) => q,
-        };
-
-        let Some(subscriber) = self
-            .domain_participant
-            .user_defined_subscriber_list
-            .iter_mut()
-            .find(|x| x.instance_handle == subscriber_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        if subscriber.enabled {
-            subscriber.qos.check_immutability(&qos)?;
-        }
-        subscriber.qos = qos;
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn get_subscriber_qos(
-        &mut self,
-        subscriber_handle: InstanceHandle,
-    ) -> DdsResult<SubscriberQos> {
-        let Some(subscriber) = self
-            .domain_participant
-            .user_defined_subscriber_list
-            .iter_mut()
-            .find(|x| x.instance_handle == subscriber_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        Ok(subscriber.qos.clone())
-    }
-
-    #[tracing::instrument(skip(self, listener_sender_task))]
-    pub fn set_subscriber_listener(
-        &mut self,
-        subscriber_handle: InstanceHandle,
-        listener_sender_task: Option<DcpsSubscriberListener>,
-        mask: Vec<StatusKind>,
-    ) -> DdsResult<()> {
-        let Some(subscriber) = self
-            .domain_participant
-            .user_defined_subscriber_list
-            .iter_mut()
-            .find(|x| x.instance_handle == subscriber_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        let listener_sender = listener_sender_task.map(|l| l.spawn::<R>(&self.spawner_handle));
-        subscriber.listener_sender = listener_sender;
-        subscriber.listener_mask = mask;
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[tracing::instrument(skip(self, dcps_listener, participant_address))]
-    pub async fn create_data_writer(
-        &mut self,
-        publisher_handle: InstanceHandle,
-        topic_name: String,
-        qos: QosKind<DataWriterQos>,
-        dcps_listener: Option<DcpsDataWriterListener>,
-        mask: Vec<StatusKind>,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
-    ) -> DdsResult<(InstanceHandle, ActorAddress<DcpsStatusCondition>)> {
-        let Some(TopicDescriptionKind::Topic(topic)) = self
-            .domain_participant
-            .topic_description_list
-            .iter()
-            .find(|x| x.topic_name() == topic_name)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        let topic_kind = get_topic_kind(topic.type_support.as_ref());
-        let type_support = topic.type_support.clone();
-        let type_name = topic.type_name.clone();
-
-        let Some(publisher) = self
-            .domain_participant
-            .user_defined_publisher_list
-            .iter_mut()
-            .find(|x| x.instance_handle == publisher_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        let entity_kind = match topic_kind {
-            TopicKind::WithKey => USER_DEFINED_WRITER_WITH_KEY,
-            TopicKind::NoKey => USER_DEFINED_WRITER_NO_KEY,
-        };
-
-        let entity_id = EntityId::new(
-            [
-                publisher.instance_handle[12],
-                self.writer_counter.to_le_bytes()[0],
-                self.writer_counter.to_le_bytes()[1],
-            ],
-            entity_kind,
-        );
-
-        let writer_handle = InstanceHandle::new([
-            self.domain_participant.instance_handle[0],
-            self.domain_participant.instance_handle[1],
-            self.domain_participant.instance_handle[2],
-            self.domain_participant.instance_handle[3],
-            self.domain_participant.instance_handle[4],
-            self.domain_participant.instance_handle[5],
-            self.domain_participant.instance_handle[6],
-            self.domain_participant.instance_handle[7],
-            self.domain_participant.instance_handle[8],
-            self.domain_participant.instance_handle[9],
-            self.domain_participant.instance_handle[10],
-            self.domain_participant.instance_handle[11],
-            entity_id.entity_key()[0],
-            entity_id.entity_key()[1],
-            entity_id.entity_key()[2],
-            entity_id.entity_kind(),
-        ]);
-        self.writer_counter += 1;
-
-        let status_condition =
-            Actor::spawn::<R>(DcpsStatusCondition::default(), &self.spawner_handle);
-        let writer_status_condition_address = status_condition.address();
-        let qos = match qos {
-            QosKind::Default => publisher.default_datawriter_qos.clone(),
-            QosKind::Specific(q) => {
-                if q.is_consistent().is_ok() {
-                    q
-                } else {
-                    return Err(DdsError::InconsistentPolicy);
-                }
-            }
-        };
-        let guid = Guid::from(*self.domain_participant.instance_handle.as_ref());
-        let transport_writer = RtpsStatefulWriter::new(
-            Guid::new(guid.prefix(), entity_id),
-            self.transport.fragment_size,
-        );
-        let listener_sender = dcps_listener.map(|l| l.spawn::<R>(&self.spawner_handle));
-        let data_writer = DataWriterEntity::new(
-            writer_handle,
-            TransportWriterKind::Stateful(transport_writer),
-            topic_name,
-            type_name,
-            type_support,
-            status_condition,
-            listener_sender,
-            mask,
-            qos,
-        );
-        let data_writer_handle = data_writer.instance_handle;
-
-        publisher.data_writer_list.push(data_writer);
-
-        if publisher.enabled && publisher.qos.entity_factory.autoenable_created_entities {
-            self.enable_data_writer(publisher_handle, writer_handle, participant_address)
-                .await?;
-        }
-
-        Ok((data_writer_handle, writer_status_condition_address))
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub async fn delete_data_writer(
-        &mut self,
-        publisher_handle: InstanceHandle,
-        datawriter_handle: InstanceHandle,
-    ) -> DdsResult<()> {
-        let Some(publisher) = self
-            .domain_participant
-            .user_defined_publisher_list
-            .iter_mut()
-            .find(|x| x.instance_handle == publisher_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        if let Some(index) = publisher
-            .data_writer_list
-            .iter()
-            .position(|x| x.instance_handle == datawriter_handle)
-        {
-            let data_writer = publisher.data_writer_list.remove(index);
-            self.announce_deleted_data_writer(data_writer).await;
-            Ok(())
-        } else {
-            return Err(DdsError::AlreadyDeleted);
-        }
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn get_default_datawriter_qos(
-        &mut self,
-        publisher_handle: InstanceHandle,
-    ) -> DdsResult<DataWriterQos> {
-        let Some(publisher) = self
-            .domain_participant
-            .user_defined_publisher_list
-            .iter_mut()
-            .find(|x| x.instance_handle == publisher_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        Ok(publisher.default_datawriter_qos.clone())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn set_default_datawriter_qos(
-        &mut self,
-        publisher_handle: InstanceHandle,
-        qos: QosKind<DataWriterQos>,
-    ) -> DdsResult<()> {
-        let Some(publisher) = self
-            .domain_participant
-            .user_defined_publisher_list
-            .iter_mut()
-            .find(|x| x.instance_handle == publisher_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        let qos = match qos {
-            QosKind::Default => DataWriterQos::default(),
-            QosKind::Specific(q) => q,
-        };
-        qos.is_consistent()?;
-        publisher.default_datawriter_qos = qos;
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn set_publisher_qos(
-        &mut self,
-        publisher_handle: InstanceHandle,
-        qos: QosKind<PublisherQos>,
-    ) -> DdsResult<()> {
-        let qos = match qos {
-            QosKind::Default => self.domain_participant.default_publisher_qos.clone(),
-            QosKind::Specific(q) => q,
-        };
-        let Some(publisher) = self
-            .domain_participant
-            .user_defined_publisher_list
-            .iter_mut()
-            .find(|x| x.instance_handle == publisher_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        publisher.qos = qos;
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn get_publisher_qos(
-        &mut self,
-        publisher_handle: InstanceHandle,
-    ) -> DdsResult<PublisherQos> {
-        let Some(publisher) = self
-            .domain_participant
-            .user_defined_publisher_list
-            .iter_mut()
-            .find(|x| x.instance_handle == publisher_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        Ok(publisher.qos.clone())
-    }
-
-    #[tracing::instrument(skip(self, dcps_listener))]
-    pub fn set_publisher_listener(
-        &mut self,
-        publisher_handle: InstanceHandle,
-        dcps_listener: Option<DcpsPublisherListener>,
-        mask: Vec<StatusKind>,
-    ) -> DdsResult<()> {
-        let Some(publisher) = self
-            .domain_participant
-            .user_defined_publisher_list
-            .iter_mut()
-            .find(|x| x.instance_handle == publisher_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let listener_sender = dcps_listener.map(|l| l.spawn::<R>(&self.spawner_handle));
-        publisher.listener_sender = listener_sender;
-        publisher.listener_mask = mask;
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub async fn get_publication_matched_status(
-        &mut self,
-        publisher_handle: InstanceHandle,
-        data_writer_handle: InstanceHandle,
-    ) -> DdsResult<PublicationMatchedStatus> {
-        let Some(publisher) = self
-            .domain_participant
-            .user_defined_publisher_list
-            .iter_mut()
-            .find(|x| x.instance_handle == publisher_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let Some(data_writer) = publisher
-            .data_writer_list
-            .iter_mut()
-            .find(|x| x.instance_handle == data_writer_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        let status = data_writer.get_publication_matched_status();
-
-        data_writer
-            .status_condition
-            .send_actor_mail(DcpsStatusConditionMail::RemoveCommunicationState {
-                state: StatusKind::PublicationMatched,
-            })
-            .await;
-        Ok(status)
-    }
-
-    #[tracing::instrument(skip(self, dcps_listener))]
-    pub fn set_listener_data_writer(
-        &mut self,
-        publisher_handle: InstanceHandle,
-        data_writer_handle: InstanceHandle,
-        dcps_listener: Option<DcpsDataWriterListener>,
-        listener_mask: Vec<StatusKind>,
-    ) -> DdsResult<()> {
-        let Some(publisher) = self
-            .domain_participant
-            .user_defined_publisher_list
-            .iter_mut()
-            .find(|x| x.instance_handle == publisher_handle)
-        else {
-            return Ok(());
-        };
-        let Some(data_writer) = publisher
-            .data_writer_list
-            .iter_mut()
-            .find(|x| x.instance_handle == data_writer_handle)
-        else {
-            return Ok(());
-        };
-
-        let listener_sender = dcps_listener.map(|l| l.spawn::<R>(&self.spawner_handle));
-        data_writer.listener_sender = listener_sender;
-        data_writer.listener_mask = listener_mask;
-
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn get_data_writer_qos(
-        &mut self,
-        publisher_handle: InstanceHandle,
-        data_writer_handle: InstanceHandle,
-    ) -> DdsResult<DataWriterQos> {
-        let Some(publisher) = self
-            .domain_participant
-            .user_defined_publisher_list
-            .iter_mut()
-            .find(|x| x.instance_handle == publisher_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let Some(data_writer) = publisher
-            .data_writer_list
-            .iter_mut()
-            .find(|x| x.instance_handle == data_writer_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        Ok(data_writer.qos.clone())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn get_matched_subscriptions(
-        &mut self,
-        publisher_handle: InstanceHandle,
-        data_writer_handle: InstanceHandle,
-    ) -> DdsResult<Vec<InstanceHandle>> {
-        let Some(publisher) = self
-            .domain_participant
-            .user_defined_publisher_list
-            .iter_mut()
-            .find(|x| x.instance_handle == publisher_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let Some(data_writer) = publisher
-            .data_writer_list
-            .iter_mut()
-            .find(|x| x.instance_handle == data_writer_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        Ok(data_writer
-            .matched_subscription_list
-            .iter()
-            .map(|x| InstanceHandle::new(x.key().value))
-            .collect())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn get_matched_subscription_data(
-        &mut self,
-        publisher_handle: InstanceHandle,
-        data_writer_handle: InstanceHandle,
-        subscription_handle: InstanceHandle,
-    ) -> DdsResult<SubscriptionBuiltinTopicData> {
-        let Some(publisher) = self
-            .domain_participant
-            .user_defined_publisher_list
-            .iter_mut()
-            .find(|x| x.instance_handle == publisher_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let Some(data_writer) = publisher
-            .data_writer_list
-            .iter_mut()
-            .find(|x| x.instance_handle == data_writer_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        data_writer
-            .matched_subscription_list
-            .iter()
-            .find(|x| subscription_handle.as_ref() == &x.key().value)
-            .ok_or(DdsError::BadParameter)
-            .cloned()
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub async fn unregister_instance(
-        &mut self,
-        publisher_handle: InstanceHandle,
-        data_writer_handle: InstanceHandle,
-        dynamic_data: DynamicData,
-        timestamp: Time,
-    ) -> DdsResult<()> {
-        let Some(publisher) = self
-            .domain_participant
-            .user_defined_publisher_list
-            .iter_mut()
-            .find(|x| x.instance_handle == publisher_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let Some(data_writer) = publisher
-            .data_writer_list
-            .iter_mut()
-            .find(|x| x.instance_handle == data_writer_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        data_writer
-            .unregister_w_timestamp(
-                dynamic_data,
-                timestamp,
-                self.transport.message_writer.as_ref(),
-                &self.clock_handle,
-            )
-            .await
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn lookup_instance(
-        &mut self,
-        publisher_handle: InstanceHandle,
-        data_writer_handle: InstanceHandle,
-        dynamic_data: DynamicData,
-    ) -> DdsResult<Option<InstanceHandle>> {
-        let Some(publisher) = self
-            .domain_participant
-            .user_defined_publisher_list
-            .iter_mut()
-            .find(|x| x.instance_handle == publisher_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let Some(data_writer) = publisher
-            .data_writer_list
-            .iter_mut()
-            .find(|x| x.instance_handle == data_writer_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        if !data_writer.enabled {
-            return Err(DdsError::NotEnabled);
-        }
-
-        let instance_handle = match get_instance_handle_from_dynamic_data(dynamic_data) {
-            Ok(k) => k,
-            Err(e) => {
-                return Err(e.into());
-            }
-        };
-
-        Ok(data_writer
-            .registered_instance_list
-            .contains(&instance_handle)
-            .then_some(instance_handle))
-    }
-
-    #[tracing::instrument(skip(self, participant_address, reply_sender))]
-    pub async fn write_w_timestamp(
-        &mut self,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
-        publisher_handle: InstanceHandle,
-        data_writer_handle: InstanceHandle,
-        dynamic_data: DynamicData,
-        timestamp: Time,
-        reply_sender: OneshotSender<DdsResult<()>>,
-    ) {
-        let now = self.get_current_time();
-        let Some(publisher) = core::iter::once(&mut self.domain_participant.builtin_publisher)
-            .chain(&mut self.domain_participant.user_defined_publisher_list)
-            .find(|x| x.instance_handle == publisher_handle)
-        else {
-            reply_sender.send(Err(DdsError::AlreadyDeleted));
-            return;
-        };
-        let Some(data_writer) = publisher
-            .data_writer_list
-            .iter_mut()
-            .find(|x| x.instance_handle == data_writer_handle)
-        else {
-            reply_sender.send(Err(DdsError::AlreadyDeleted));
-            return;
-        };
-
-        if !data_writer.enabled {
-            reply_sender.send(Err(DdsError::NotEnabled));
-            return;
-        }
-
-        let instance_handle = match get_instance_handle_from_dynamic_data(dynamic_data.clone()) {
-            Ok(h) => h,
-            Err(e) => {
-                reply_sender.send(Err(e.into()));
-                return;
-            }
-        };
-
-        if !data_writer
-            .registered_instance_list
-            .contains(&instance_handle)
-        {
-            if data_writer.registered_instance_list.len()
-                < data_writer.qos.resource_limits.max_instances
-            {
-                data_writer.registered_instance_list.push(instance_handle);
-            } else {
-                reply_sender.send(Err(DdsError::OutOfResources));
-                return;
-            }
-        }
-
-        if let Length::Limited(max_instances) = data_writer.qos.resource_limits.max_instances {
-            if !data_writer
-                .instance_samples
-                .iter()
-                .any(|x| x.instance == instance_handle)
-                && data_writer.instance_samples.len() == max_instances as usize
-            {
-                reply_sender.send(Err(DdsError::OutOfResources));
-                return;
-            }
-        }
-
-        if let Length::Limited(max_samples_per_instance) =
-            data_writer.qos.resource_limits.max_samples_per_instance
-        {
-            // If the history Qos guarantess that the number of samples
-            // is below the limit there is no need to check
-            match data_writer.qos.history.kind {
-                HistoryQosPolicyKind::KeepLast(depth)
-                    if depth as i32 <= max_samples_per_instance => {}
-                _ => {
-                    if let Some(s) = data_writer
-                        .instance_samples
-                        .iter()
-                        .find(|x| x.instance == instance_handle)
-                    {
-                        // Only Alive changes count towards the resource limits
-                        if s.samples.len() >= max_samples_per_instance as usize {
-                            reply_sender.send(Err(DdsError::OutOfResources));
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Length::Limited(max_samples) = data_writer.qos.resource_limits.max_samples {
-            let total_samples = data_writer
-                .instance_samples
-                .iter()
-                .fold(0, |acc, x| acc + x.samples.len());
-
-            if total_samples >= max_samples as usize {
-                reply_sender.send(Err(DdsError::OutOfResources));
-                return;
-            }
-        }
-
-        let serialized_data = match serialize(&dynamic_data, &data_writer.qos.representation) {
-            Ok(s) => s,
-            Err(e) => {
-                reply_sender.send(Err(e));
-                return;
-            }
-        };
-
-        if let HistoryQosPolicyKind::KeepLast(depth) = data_writer.qos.history.kind {
-            if let Some(s) = data_writer
-                .instance_samples
-                .iter_mut()
-                .find(|x| x.instance == instance_handle)
-            {
-                if s.samples.len() == depth as usize {
-                    if let Some(&smallest_seq_num_instance) = s.samples.front() {
-                        if data_writer.qos.reliability.kind == ReliabilityQosPolicyKind::Reliable {
-                            if let TransportWriterKind::Stateful(w) = &data_writer.transport_writer
-                            {
-                                if !w.is_change_acknowledged(smallest_seq_num_instance) {
-                                    if data_writer.acknowledgement_notification.is_some() {
-                                        reply_sender.send(Err(DdsError::Error(String::from(
-                                            "Another writer already waiting for acknowledgements.",
-                                        ))));
-                                        return;
-                                    }
-                                    let mut timer_handle = self.timer_handle.clone();
-                                    let max_blocking_time =
-                                        data_writer.qos.reliability.max_blocking_time;
-                                    let (
-                                        acknowledgment_notification_sender,
-                                        acknowledgment_notification_receiver,
-                                    ) = oneshot::<()>();
-                                    data_writer.acknowledgement_notification =
-                                        Some(acknowledgment_notification_sender);
-                                    let participant_address_clone = participant_address.clone();
-                                    self.spawner_handle.spawn(async move {
-                                        if let DurationKind::Finite(t) = max_blocking_time {
-                                            let max_blocking_time_wait =
-                                                timer_handle.delay(t.into());
-                                            match select_future(
-                                                acknowledgment_notification_receiver,
-                                                max_blocking_time_wait,
-                                            )
-                                            .await
-                                            {
-                                                Either::A(_) => {
-                                                    participant_address_clone
-                                                        .send(DcpsDomainParticipantMail::Writer(
-                                                            WriterServiceMail::WriteWTimestamp {
-                                                                participant_address:
-                                                                    participant_address_clone
-                                                                        .clone(),
-                                                                publisher_handle,
-                                                                data_writer_handle,
-                                                                dynamic_data,
-                                                                timestamp,
-                                                                reply_sender,
-                                                            },
-                                                        ))
-                                                        .await
-                                                        .ok();
-                                                }
-                                                Either::B(_) => {
-                                                    reply_sender.send(Err(DdsError::Timeout))
-                                                }
-                                            };
-                                        } else {
-                                            acknowledgment_notification_receiver.await.ok();
-                                            participant_address_clone
-                                                .send(DcpsDomainParticipantMail::Writer(
-                                                    WriterServiceMail::WriteWTimestamp {
-                                                        participant_address:
-                                                            participant_address_clone.clone(),
-                                                        publisher_handle,
-                                                        data_writer_handle,
-                                                        dynamic_data,
-                                                        timestamp,
-                                                        reply_sender,
-                                                    },
-                                                ))
-                                                .await
-                                                .ok();
-                                        }
-                                    });
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                    if let Some(smallest_seq_num_instance) = s.samples.pop_front() {
-                        data_writer
-                            .transport_writer
-                            .remove_change(smallest_seq_num_instance)
-                            .await;
-                    }
-                }
-            }
-        }
-
-        data_writer.last_change_sequence_number += 1;
-        let change = CacheChange {
-            kind: ChangeKind::Alive,
-            writer_guid: data_writer.transport_writer.guid(),
-            sequence_number: data_writer.last_change_sequence_number,
-            source_timestamp: Some(timestamp.into()),
-            instance_handle: Some(instance_handle.into()),
-            data_value: serialized_data.into(),
-        };
-        let seq_num = change.sequence_number;
-
-        if seq_num > data_writer.max_seq_num.unwrap_or(0) {
-            data_writer.max_seq_num = Some(seq_num)
-        }
-
-        match data_writer
-            .instance_publication_time
-            .iter_mut()
-            .find(|x| x.instance == instance_handle)
-        {
-            Some(x) => {
-                if x.last_write_time < timestamp {
-                    x.last_write_time = timestamp;
-                }
-            }
-            None => data_writer
-                .instance_publication_time
-                .push(InstancePublicationTime {
-                    instance: instance_handle,
-                    last_write_time: timestamp,
-                }),
-        }
-
-        match data_writer
-            .instance_samples
-            .iter_mut()
-            .find(|x| x.instance == instance_handle)
-        {
-            Some(s) => s.samples.push_back(change.sequence_number),
-            None => {
-                let s = InstanceSamples {
-                    instance: instance_handle,
-                    samples: VecDeque::from([change.sequence_number]),
-                };
-                data_writer.instance_samples.push(s);
-            }
-        }
-
-        if let DurationKind::Finite(deadline_missed_period) = data_writer.qos.deadline.period {
-            let mut timer_handle = self.timer_handle.clone();
-            let participant_address_clone = participant_address.clone();
-            self.spawner_handle.spawn(async move {
-                loop {
-                    timer_handle.delay(deadline_missed_period.into()).await;
-                    participant_address_clone
-                        .send(DcpsDomainParticipantMail::Event(
-                            EventServiceMail::OfferedDeadlineMissed {
-                                publisher_handle,
-                                data_writer_handle,
-                                change_instance_handle: instance_handle,
-                                participant_address: participant_address_clone.clone(),
-                            },
-                        ))
-                        .await
-                        .ok();
-                }
-            });
-        }
-
-        let sequence_number = data_writer.last_change_sequence_number;
-
-        if let DurationKind::Finite(lifespan_duration) = data_writer.qos.lifespan.duration {
-            let sleep_duration = timestamp - now + lifespan_duration;
-            let mut timer_handle = self.timer_handle.clone();
-            if sleep_duration <= Duration::new(0, 0) {
-                reply_sender.send(Ok(()));
-                return;
-            }
-
-            self.spawner_handle.spawn(async move {
-                timer_handle.delay(sleep_duration.into()).await;
-                participant_address
-                    .send(DcpsDomainParticipantMail::Message(
-                        MessageServiceMail::RemoveWriterChange {
-                            publisher_handle,
-                            data_writer_handle,
-                            sequence_number,
-                        },
-                    ))
-                    .await
-                    .ok();
-            });
-        }
-
-        data_writer
-            .transport_writer
-            .add_change(
-                change,
-                self.transport.message_writer.as_ref(),
-                &self.clock_handle,
-            )
-            .await;
-
-        reply_sender.send(Ok(()));
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub async fn dispose_w_timestamp(
-        &mut self,
-        publisher_handle: InstanceHandle,
-        data_writer_handle: InstanceHandle,
-        dynamic_data: DynamicData,
-        timestamp: Time,
-    ) -> DdsResult<()> {
-        let Some(publisher) = self
-            .domain_participant
-            .user_defined_publisher_list
-            .iter_mut()
-            .find(|x| x.instance_handle == publisher_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let Some(data_writer) = publisher
-            .data_writer_list
-            .iter_mut()
-            .find(|x| x.instance_handle == data_writer_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        data_writer
-            .dispose_w_timestamp(
-                dynamic_data,
-                timestamp,
-                self.transport.message_writer.as_ref(),
-                &self.clock_handle,
-            )
-            .await
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub async fn get_offered_deadline_missed_status(
-        &mut self,
-        publisher_handle: InstanceHandle,
-        data_writer_handle: InstanceHandle,
-    ) -> DdsResult<OfferedDeadlineMissedStatus> {
-        let Some(publisher) = self
-            .domain_participant
-            .user_defined_publisher_list
-            .iter_mut()
-            .find(|x| x.instance_handle == publisher_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let Some(data_writer) = publisher
-            .data_writer_list
-            .iter_mut()
-            .find(|x| x.instance_handle == data_writer_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        Ok(data_writer.get_offered_deadline_missed_status().await)
-    }
-
-    #[tracing::instrument(skip(self, participant_address))]
-    pub async fn enable_data_writer(
-        &mut self,
-        publisher_handle: InstanceHandle,
-        data_writer_handle: InstanceHandle,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
-    ) -> DdsResult<()> {
-        let Some(publisher) = self
-            .domain_participant
-            .user_defined_publisher_list
-            .iter_mut()
-            .find(|x| x.instance_handle == publisher_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let Some(data_writer) = publisher
-            .data_writer_list
-            .iter_mut()
-            .find(|x| x.instance_handle == data_writer_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        if !data_writer.enabled {
-            data_writer.enabled = true;
-
-            let discovered_reader_list: Vec<_> =
-                self.domain_participant.discovered_reader_list.to_vec();
-            for discovered_reader_data in discovered_reader_list {
-                self.add_discovered_reader(
-                    discovered_reader_data,
-                    publisher_handle,
-                    data_writer_handle,
-                    participant_address.clone(),
-                )
-                .await;
-            }
-
-            self.announce_data_writer(publisher_handle, data_writer_handle, participant_address)
-                .await;
-        }
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub async fn set_data_writer_qos(
-        &mut self,
-        publisher_handle: InstanceHandle,
-        data_writer_handle: InstanceHandle,
-        qos: QosKind<DataWriterQos>,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
-    ) -> DdsResult<()> {
-        let Some(publisher) = self
-            .domain_participant
-            .user_defined_publisher_list
-            .iter_mut()
-            .find(|x| x.instance_handle == publisher_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let qos = match qos {
-            QosKind::Default => publisher.default_datawriter_qos.clone(),
-            QosKind::Specific(q) => q,
-        };
-        let Some(data_writer) = publisher
-            .data_writer_list
-            .iter_mut()
-            .find(|x| x.instance_handle == data_writer_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        qos.is_consistent()?;
-        if data_writer.enabled {
-            data_writer.qos.check_immutability(&qos)?;
-        }
-        data_writer.qos = qos;
-
-        if data_writer.enabled {
-            self.announce_data_writer(publisher_handle, data_writer_handle, participant_address)
-                .await;
-        }
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub async fn are_all_changes_acknowledged(
-        &mut self,
-        publisher_handle: InstanceHandle,
-        data_writer_handle: InstanceHandle,
-    ) -> DdsResult<bool> {
-        let Some(publisher) = self
-            .domain_participant
-            .user_defined_publisher_list
-            .iter()
-            .find(|x| x.instance_handle == publisher_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        let Some(data_writer) = publisher
-            .data_writer_list
-            .iter()
-            .find(|x| x.instance_handle == data_writer_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        Ok(data_writer.are_all_changes_acknowledged().await)
-    }
-
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-    #[tracing::instrument(skip(self))]
-    pub async fn read(
-        &mut self,
-        subscriber_handle: InstanceHandle,
-        data_reader_handle: InstanceHandle,
-        max_samples: i32,
-        sample_states: Vec<SampleStateKind>,
-        view_states: Vec<ViewStateKind>,
-        instance_states: Vec<InstanceStateKind>,
-        specific_instance_handle: Option<InstanceHandle>,
-    ) -> DdsResult<Vec<(Option<DynamicData>, SampleInfo)>> {
-        let subscriber = if subscriber_handle == self.domain_participant.instance_handle {
-            Some(&mut self.domain_participant.builtin_subscriber)
-        } else {
-            self.domain_participant
-                .user_defined_subscriber_list
-                .iter_mut()
-                .find(|x| x.instance_handle == subscriber_handle)
-        };
-
-        let Some(subscriber) = subscriber else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        let Some(data_reader) = subscriber
-            .data_reader_list
-            .iter_mut()
-            .find(|x| x.instance_handle == data_reader_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        data_reader
-            .read(
-                max_samples,
-                &sample_states,
-                &view_states,
-                &instance_states,
-                specific_instance_handle,
-            )
-            .await
-    }
-
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-    #[tracing::instrument(skip(self))]
-    pub async fn take(
-        &mut self,
-        subscriber_handle: InstanceHandle,
-        data_reader_handle: InstanceHandle,
-        max_samples: i32,
-        sample_states: Vec<SampleStateKind>,
-        view_states: Vec<ViewStateKind>,
-        instance_states: Vec<InstanceStateKind>,
-        specific_instance_handle: Option<InstanceHandle>,
-    ) -> DdsResult<Vec<(Option<DynamicData>, SampleInfo)>> {
-        let Some(subscriber) = self
-            .domain_participant
-            .user_defined_subscriber_list
-            .iter_mut()
-            .find(|x| x.instance_handle == subscriber_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let Some(data_reader) = subscriber
-            .data_reader_list
-            .iter_mut()
-            .find(|x| x.instance_handle == data_reader_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        data_reader
-            .take(
-                max_samples,
-                sample_states,
-                view_states,
-                instance_states,
-                specific_instance_handle,
-            )
-            .await
-    }
-
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-    #[tracing::instrument(skip(self))]
-    pub async fn read_next_instance(
-        &mut self,
-        subscriber_handle: InstanceHandle,
-        data_reader_handle: InstanceHandle,
-        max_samples: i32,
-        previous_handle: Option<InstanceHandle>,
-        sample_states: Vec<SampleStateKind>,
-        view_states: Vec<ViewStateKind>,
-        instance_states: Vec<InstanceStateKind>,
-    ) -> DdsResult<Vec<(Option<DynamicData>, SampleInfo)>> {
-        let Some(subscriber) = self
-            .domain_participant
-            .user_defined_subscriber_list
-            .iter_mut()
-            .find(|x| x.instance_handle == subscriber_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let Some(data_reader) = subscriber
-            .data_reader_list
-            .iter_mut()
-            .find(|x| x.instance_handle == data_reader_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        data_reader
-            .read_next_instance(
-                max_samples,
-                previous_handle,
-                &sample_states,
-                &view_states,
-                &instance_states,
-            )
-            .await
-    }
-
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-    #[tracing::instrument(skip(self))]
-    pub async fn take_next_instance(
-        &mut self,
-        subscriber_handle: InstanceHandle,
-        data_reader_handle: InstanceHandle,
-        max_samples: i32,
-        previous_handle: Option<InstanceHandle>,
-        sample_states: Vec<SampleStateKind>,
-        view_states: Vec<ViewStateKind>,
-        instance_states: Vec<InstanceStateKind>,
-    ) -> DdsResult<Vec<(Option<DynamicData>, SampleInfo)>> {
-        let Some(subscriber) = self
-            .domain_participant
-            .user_defined_subscriber_list
-            .iter_mut()
-            .find(|x| x.instance_handle == subscriber_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let Some(data_reader) = subscriber
-            .data_reader_list
-            .iter_mut()
-            .find(|x| x.instance_handle == data_reader_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        data_reader
-            .take_next_instance(
-                max_samples,
-                previous_handle,
-                sample_states,
-                view_states,
-                instance_states,
-            )
-            .await
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub async fn get_subscription_matched_status(
-        &mut self,
-        subscriber_handle: InstanceHandle,
-        data_reader_handle: InstanceHandle,
-    ) -> DdsResult<SubscriptionMatchedStatus> {
-        let Some(subscriber) = self
-            .domain_participant
-            .user_defined_subscriber_list
-            .iter_mut()
-            .find(|x| x.instance_handle == subscriber_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let Some(data_reader) = subscriber
-            .data_reader_list
-            .iter_mut()
-            .find(|x| x.instance_handle == data_reader_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let status = data_reader.get_subscription_matched_status();
-        data_reader
-            .status_condition
-            .send_actor_mail(DcpsStatusConditionMail::RemoveCommunicationState {
-                state: StatusKind::SubscriptionMatched,
-            })
-            .await;
-        Ok(status)
-    }
-
-    //#[tracing::instrument(skip(self, participant_address))]
-    pub fn wait_for_historical_data(
-        &mut self,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
-        subscriber_handle: InstanceHandle,
-        data_reader_handle: InstanceHandle,
-        max_wait: Duration,
-    ) -> Pin<Box<dyn Future<Output = DdsResult<()>> + Send>> {
-        let timer_handle = self.timer_handle.clone();
-        Box::pin(async move {
-            poll_timeout(
-                timer_handle,
-                max_wait.into(),
-                Box::pin(async move {
-                    loop {
-                        let (reply_sender, reply_receiver) = oneshot();
-                        participant_address
-                            .send(DcpsDomainParticipantMail::Message(
-                                MessageServiceMail::IsHistoricalDataReceived {
-                                    subscriber_handle,
-                                    data_reader_handle,
-                                    reply_sender,
-                                },
-                            ))
-                            .await?;
-
-                        let reply = reply_receiver.await;
-                        match reply {
-                            Ok(historical_data_received) => match historical_data_received {
-                                Ok(true) => return Ok(()),
-                                Ok(false) => (),
-                                Err(e) => return Err(e),
-                            },
-                            Err(_) => return Err(DdsError::Error(String::from("Channel error"))),
-                        }
-                    }
-                }),
-            )
-            .await?
-        })
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn get_matched_publication_data(
-        &mut self,
-        subscriber_handle: InstanceHandle,
-        data_reader_handle: InstanceHandle,
-        publication_handle: InstanceHandle,
-    ) -> DdsResult<PublicationBuiltinTopicData> {
-        let Some(subscriber) = self
-            .domain_participant
-            .user_defined_subscriber_list
-            .iter_mut()
-            .find(|x| x.instance_handle == subscriber_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let Some(data_reader) = subscriber
-            .data_reader_list
-            .iter()
-            .find(|x| x.instance_handle == data_reader_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        if !data_reader.enabled {
-            return Err(DdsError::NotEnabled);
-        }
-
-        data_reader
-            .matched_publication_list
-            .iter()
-            .find(|x| &x.key().value == publication_handle.as_ref())
-            .cloned()
-            .ok_or(DdsError::BadParameter)
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn get_matched_publications(
-        &mut self,
-        subscriber_handle: InstanceHandle,
-        data_reader_handle: InstanceHandle,
-    ) -> DdsResult<Vec<InstanceHandle>> {
-        let Some(subscriber) = self
-            .domain_participant
-            .user_defined_subscriber_list
-            .iter_mut()
-            .find(|x| x.instance_handle == subscriber_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let Some(data_reader) = subscriber
-            .data_reader_list
-            .iter()
-            .find(|x| x.instance_handle == data_reader_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        Ok(data_reader.get_matched_publications())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub async fn set_data_reader_qos(
-        &mut self,
-        subscriber_handle: InstanceHandle,
-        data_reader_handle: InstanceHandle,
-        qos: QosKind<DataReaderQos>,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
-    ) -> DdsResult<()> {
-        let Some(subscriber) = self
-            .domain_participant
-            .user_defined_subscriber_list
-            .iter_mut()
-            .find(|x| x.instance_handle == subscriber_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let qos = match qos {
-            QosKind::Default => subscriber.default_data_reader_qos.clone(),
-            QosKind::Specific(q) => q,
-        };
-        let Some(data_reader) = subscriber
-            .data_reader_list
-            .iter_mut()
-            .find(|x| x.instance_handle == data_reader_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        qos.is_consistent()?;
-        if data_reader.enabled {
-            data_reader.qos.check_immutability(&qos)?
-        }
-
-        data_reader.qos = qos;
-
-        if data_reader.enabled {
-            self.announce_data_reader(subscriber_handle, data_reader_handle, participant_address)
-                .await;
-        }
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub fn get_data_reader_qos(
-        &mut self,
-        subscriber_handle: InstanceHandle,
-        data_reader_handle: InstanceHandle,
-    ) -> DdsResult<DataReaderQos> {
-        let Some(subscriber) = self
-            .domain_participant
-            .user_defined_subscriber_list
-            .iter_mut()
-            .find(|x| x.instance_handle == subscriber_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        let Some(data_reader) = subscriber
-            .data_reader_list
-            .iter_mut()
-            .find(|x| x.instance_handle == data_reader_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        Ok(data_reader.qos.clone())
-    }
-
-    #[tracing::instrument(skip(self, dcps_listener))]
-    pub fn set_data_reader_listener(
-        &mut self,
-        subscriber_handle: InstanceHandle,
-        data_reader_handle: InstanceHandle,
-        dcps_listener: Option<DcpsDataReaderListener>,
-        listener_mask: Vec<StatusKind>,
-    ) -> DdsResult<()> {
-        let Some(subscriber) = self
-            .domain_participant
-            .user_defined_subscriber_list
-            .iter_mut()
-            .find(|x| x.instance_handle == subscriber_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let Some(data_reader) = subscriber
-            .data_reader_list
-            .iter_mut()
-            .find(|x| x.instance_handle == data_reader_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let listener_sender = dcps_listener.map(|l| l.spawn::<R>(&self.spawner_handle));
-        data_reader.listener_sender = listener_sender;
-        data_reader.listener_mask = listener_mask;
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub async fn is_historical_data_received(
-        &mut self,
-        subscriber_handle: InstanceHandle,
-        data_reader_handle: InstanceHandle,
-    ) -> DdsResult<bool> {
-        let Some(subscriber) = self
-            .domain_participant
-            .user_defined_subscriber_list
-            .iter()
-            .find(|x| x.instance_handle == subscriber_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-
-        let Some(data_reader) = subscriber
-            .data_reader_list
-            .iter()
-            .find(|x| x.instance_handle == data_reader_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        if !data_reader.enabled {
-            return Err(DdsError::NotEnabled);
-        };
-
-        match data_reader.qos.durability.kind {
-            DurabilityQosPolicyKind::Volatile => {
-                return Err(DdsError::IllegalOperation);
-            }
-            DurabilityQosPolicyKind::TransientLocal
-            | DurabilityQosPolicyKind::Transient
-            | DurabilityQosPolicyKind::Persistent => (),
-        };
-
-        if let TransportReaderKind::Stateful(r) = &data_reader.transport_reader {
-            Ok(r.is_historical_data_received())
-        } else {
-            Ok(true)
-        }
-    }
-
-    #[tracing::instrument(skip(self, participant_address))]
-    pub async fn enable_data_reader(
-        &mut self,
-        subscriber_handle: InstanceHandle,
-        data_reader_handle: InstanceHandle,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
-    ) -> DdsResult<()> {
-        let Some(subscriber) = self
-            .domain_participant
-            .user_defined_subscriber_list
-            .iter_mut()
-            .find(|x| x.instance_handle == subscriber_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        let Some(data_reader) = subscriber
-            .data_reader_list
-            .iter_mut()
-            .find(|x| x.instance_handle == data_reader_handle)
-        else {
-            return Err(DdsError::AlreadyDeleted);
-        };
-        if !data_reader.enabled {
-            data_reader.enabled = true;
-
-            let discovered_writer_list: Vec<_> =
-                self.domain_participant.discovered_writer_list.to_vec();
-            for discovered_writer_data in discovered_writer_list {
-                self.add_discovered_writer(
-                    discovered_writer_data,
-                    subscriber_handle,
-                    data_reader_handle,
-                    participant_address.clone(),
-                )
-                .await;
-            }
-
-            self.announce_data_reader(subscriber_handle, data_reader_handle, participant_address)
-                .await;
-        }
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self))]
-    pub async fn announce_participant(
-        &mut self,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
-    ) {
+    #[tracing::instrument(skip(self, dcps_sender))]
+    pub async fn announce_participant(&mut self, dcps_sender: MpscSender<DcpsMail>) {
         if self.domain_participant.enabled {
             let builtin_topic_key = *self.domain_participant.instance_handle.as_ref();
             let guid = Guid::from(builtin_topic_key);
@@ -3546,7 +946,7 @@ where
             let timestamp = self.get_current_time();
             let (reply_sender, _) = oneshot();
             self.write_w_timestamp(
-                participant_address,
+                dcps_sender,
                 self.domain_participant.builtin_publisher.instance_handle,
                 data_writer_handle,
                 spdp_discovered_participant_data.create_dynamic_sample(),
@@ -3593,12 +993,12 @@ where
         }
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(skip(self, dcps_sender))]
     async fn announce_data_writer(
         &mut self,
         publisher_handle: InstanceHandle,
         data_writer_handle: InstanceHandle,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
+        dcps_sender: MpscSender<DcpsMail>,
     ) {
         let Some(publisher) = self
             .domain_participant
@@ -3671,7 +1071,7 @@ where
         let timestamp = self.get_current_time();
         let (reply_sender, _) = oneshot();
         self.write_w_timestamp(
-            participant_address,
+            dcps_sender,
             self.domain_participant.builtin_publisher.instance_handle,
             data_writer_handle,
             discovered_writer_data.create_dynamic_sample(),
@@ -3714,12 +1114,12 @@ where
         }
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(skip(self, dcps_sender))]
     async fn announce_data_reader(
         &mut self,
         subscriber_handle: InstanceHandle,
         data_reader_handle: InstanceHandle,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
+        dcps_sender: MpscSender<DcpsMail>,
     ) {
         let Some(subscriber) = self
             .domain_participant
@@ -3804,7 +1204,7 @@ where
         let timestamp = self.get_current_time();
         let (reply_sender, _) = oneshot();
         self.write_w_timestamp(
-            participant_address,
+            dcps_sender,
             self.domain_participant.builtin_publisher.instance_handle,
             data_writer_handle,
             discovered_reader_data.create_dynamic_sample(),
@@ -3847,11 +1247,7 @@ where
     }
 
     #[tracing::instrument(skip(self))]
-    async fn announce_topic(
-        &mut self,
-        topic_name: String,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
-    ) {
+    async fn announce_topic(&mut self, topic_name: String, dcps_sender: MpscSender<DcpsMail>) {
         let Some(TopicDescriptionKind::Topic(topic)) = self
             .domain_participant
             .topic_description_list
@@ -3894,7 +1290,7 @@ where
         let timestamp = self.get_current_time();
         let (reply_sender, _) = oneshot();
         self.write_w_timestamp(
-            participant_address,
+            dcps_sender,
             self.domain_participant.builtin_publisher.instance_handle,
             data_writer_handle,
             discovered_topic_data.create_dynamic_sample(),
@@ -3904,13 +1300,13 @@ where
         .await;
     }
 
-    #[tracing::instrument(skip(self, participant_address))]
+    #[tracing::instrument(skip(self, dcps_sender))]
     async fn add_discovered_reader(
         &mut self,
         discovered_reader_data: DiscoveredReaderData,
         publisher_handle: InstanceHandle,
         data_writer_handle: InstanceHandle,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
+        dcps_sender: MpscSender<DcpsMail>,
     ) {
         let default_unicast_locator_list = if let Some(p) = self
             .domain_participant
@@ -4077,7 +1473,7 @@ where
                     {
                         let status = data_writer.get_publication_matched_status();
                         let Ok(the_writer) = self.get_data_writer_async(
-                            participant_address,
+                            dcps_sender,
                             publisher_handle,
                             data_writer_handle,
                         ) else {
@@ -4108,7 +1504,7 @@ where
                         .contains(&StatusKind::PublicationMatched)
                     {
                         let Ok(the_writer) = self.get_data_writer_async(
-                            participant_address,
+                            dcps_sender,
                             publisher_handle,
                             data_writer_handle,
                         ) else {
@@ -4141,7 +1537,7 @@ where
                         .contains(&StatusKind::PublicationMatched)
                     {
                         let Ok(the_writer) = self.get_data_writer_async(
-                            participant_address,
+                            dcps_sender,
                             publisher_handle,
                             data_writer_handle,
                         ) else {
@@ -4205,7 +1601,7 @@ where
                     {
                         let status = data_writer.get_offered_incompatible_qos_status();
                         let Ok(the_writer) = self.get_data_writer_async(
-                            participant_address,
+                            dcps_sender,
                             publisher_handle,
                             data_writer_handle,
                         ) else {
@@ -4236,7 +1632,7 @@ where
                         .contains(&StatusKind::OfferedIncompatibleQos)
                     {
                         let Ok(the_writer) = self.get_data_writer_async(
-                            participant_address,
+                            dcps_sender,
                             publisher_handle,
                             data_writer_handle,
                         ) else {
@@ -4269,7 +1665,7 @@ where
                         .contains(&StatusKind::OfferedIncompatibleQos)
                     {
                         let Ok(the_writer) = self.get_data_writer_async(
-                            participant_address,
+                            dcps_sender,
                             publisher_handle,
                             data_writer_handle,
                         ) else {
@@ -4362,13 +1758,13 @@ where
         }
     }
 
-    #[tracing::instrument(skip(self, participant_address))]
+    #[tracing::instrument(skip(self, dcps_sender))]
     async fn add_discovered_writer(
         &mut self,
         discovered_writer_data: DiscoveredWriterData,
         subscriber_handle: InstanceHandle,
         data_reader_handle: InstanceHandle,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
+        dcps_sender: MpscSender<DcpsMail>,
     ) {
         let default_unicast_locator_list = if let Some(p) = self
             .domain_participant
@@ -4545,7 +1941,7 @@ where
                         .contains(&StatusKind::SubscriptionMatched)
                     {
                         let Ok(the_reader) = self.get_data_reader_async(
-                            participant_address,
+                            dcps_sender,
                             subscriber_handle,
                             data_reader_handle,
                         ) else {
@@ -4577,7 +1973,7 @@ where
                         .contains(&StatusKind::SubscriptionMatched)
                     {
                         let Ok(the_reader) = self.get_data_reader_async(
-                            participant_address,
+                            dcps_sender,
                             subscriber_handle,
                             data_reader_handle,
                         ) else {
@@ -4610,7 +2006,7 @@ where
                         .contains(&StatusKind::SubscriptionMatched)
                     {
                         let Ok(the_reader) = self.get_data_reader_async(
-                            participant_address,
+                            dcps_sender,
                             subscriber_handle,
                             data_reader_handle,
                         ) else {
@@ -4674,7 +2070,7 @@ where
                     {
                         let status = data_reader.get_requested_incompatible_qos_status();
                         let Ok(the_reader) = self.get_data_reader_async(
-                            participant_address,
+                            dcps_sender,
                             subscriber_handle,
                             data_reader_handle,
                         ) else {
@@ -4705,7 +2101,7 @@ where
                         .contains(&StatusKind::RequestedIncompatibleQos)
                     {
                         let Ok(the_reader) = self.get_data_reader_async(
-                            participant_address,
+                            dcps_sender,
                             subscriber_handle,
                             data_reader_handle,
                         ) else {
@@ -4738,7 +2134,7 @@ where
                         .contains(&StatusKind::RequestedIncompatibleQos)
                     {
                         let Ok(the_reader) = self.get_data_reader_async(
-                            participant_address,
+                            dcps_sender,
                             subscriber_handle,
                             data_reader_handle,
                         ) else {
@@ -4830,7 +2226,7 @@ where
     pub async fn add_builtin_participants_detector_cache_change(
         &mut self,
         cache_change: CacheChange,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
+        dcps_sender: MpscSender<DcpsMail>,
     ) {
         match cache_change.kind {
             ChangeKind::Alive => {
@@ -4841,11 +2237,8 @@ where
                     let discovered_participant_data =
                         SpdpDiscoveredParticipantData::create_sample(dynamic_data);
 
-                    self.add_discovered_participant(
-                        discovered_participant_data,
-                        participant_address,
-                    )
-                    .await;
+                    self.add_discovered_participant(discovered_participant_data, dcps_sender)
+                        .await;
                 }
             }
             ChangeKind::NotAliveDisposed | ChangeKind::NotAliveDisposedUnregistered => {
@@ -4880,11 +2273,11 @@ where
         }
     }
 
-    #[tracing::instrument(skip(self, participant_address))]
+    #[tracing::instrument(skip(self, dcps_sender))]
     pub async fn add_builtin_publications_detector_cache_change(
         &mut self,
         cache_change: CacheChange,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
+        dcps_sender: MpscSender<DcpsMail>,
     ) {
         match cache_change.kind {
             ChangeKind::Alive => {
@@ -4937,7 +2330,7 @@ where
                             discovered_writer_data.clone(),
                             subscriber_handle,
                             data_reader_handle,
-                            participant_address.clone(),
+                            dcps_sender.clone(),
                         )
                         .await;
                     }
@@ -4990,11 +2383,11 @@ where
         }
     }
 
-    #[tracing::instrument(skip(self, participant_address))]
+    #[tracing::instrument(skip(self, dcps_sender))]
     pub async fn add_builtin_subscriptions_detector_cache_change(
         &mut self,
         cache_change: CacheChange,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
+        dcps_sender: MpscSender<DcpsMail>,
     ) {
         match cache_change.kind {
             ChangeKind::Alive => {
@@ -5077,7 +2470,7 @@ where
                             discovered_reader_data.clone(),
                             publisher_handle,
                             data_writer_handle,
-                            participant_address.clone(),
+                            dcps_sender.clone(),
                         )
                         .await;
                     }
@@ -5188,10 +2581,10 @@ where
         }
     }
 
-    #[tracing::instrument(skip(self, participant_address))]
+    #[tracing::instrument(skip(self, dcps_sender))]
     pub async fn add_cache_change(
         &mut self,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
+        dcps_sender: MpscSender<DcpsMail>,
         cache_change: CacheChange,
         subscriber_handle: InstanceHandle,
         data_reader_handle: InstanceHandle,
@@ -5341,6 +2734,7 @@ where
                 }
             }
 
+            let participant_handle = self.domain_participant.instance_handle;
             match data_reader.add_reader_change(cache_change, reception_timestamp) {
                 Ok(AddChangeResult::Added(change_instance_handle)) => {
                     info!("New change added");
@@ -5348,18 +2742,19 @@ where
                         data_reader.qos.deadline.period
                     {
                         let mut timer_handle = self.timer_handle.clone();
-                        let participant_address = participant_address.clone();
+                        let dcps_sender = dcps_sender.clone();
 
                         self.spawner_handle.spawn(async move {
                             loop {
                                 timer_handle.delay(deadline_missed_period.into()).await;
-                                participant_address
-                                    .send(DcpsDomainParticipantMail::Event(
+                                dcps_sender
+                                    .send(DcpsMail::Event(
                                         EventServiceMail::RequestedDeadlineMissed {
+                                            participant_handle,
                                             subscriber_handle,
                                             data_reader_handle,
                                             change_instance_handle,
-                                            participant_address: participant_address.clone(),
+                                            dcps_sender: dcps_sender.clone(),
                                         },
                                     ))
                                     .await
@@ -5384,8 +2779,8 @@ where
                         .listener_mask
                         .contains(&StatusKind::DataOnReaders)
                     {
-                        let Ok(the_subscriber) = self
-                            .get_subscriber_async(participant_address.clone(), subscriber_handle)
+                        let Ok(the_subscriber) =
+                            self.get_subscriber_async(dcps_sender, subscriber_handle)
                         else {
                             return;
                         };
@@ -5405,7 +2800,7 @@ where
                         }
                     } else if data_reader_on_data_available_active {
                         let Ok(the_reader) = self.get_data_reader_async(
-                            participant_address,
+                            dcps_sender,
                             subscriber_handle,
                             data_reader_handle,
                         ) else {
@@ -5478,7 +2873,7 @@ where
                     {
                         let status = data_reader.get_sample_rejected_status();
                         let Ok(the_reader) = self.get_data_reader_async(
-                            participant_address,
+                            dcps_sender,
                             subscriber_handle,
                             data_reader_handle,
                         ) else {
@@ -5510,7 +2905,7 @@ where
                         .contains(&StatusKind::SampleRejected)
                     {
                         let Ok(the_reader) = self.get_data_reader_async(
-                            participant_address,
+                            dcps_sender,
                             subscriber_handle,
                             data_reader_handle,
                         ) else {
@@ -5544,7 +2939,7 @@ where
                         .contains(&StatusKind::SampleRejected)
                     {
                         let Ok(the_reader) = self.get_data_reader_async(
-                            participant_address,
+                            dcps_sender,
                             subscriber_handle,
                             data_reader_handle,
                         ) else {
@@ -5625,13 +3020,13 @@ where
         }
     }
 
-    #[tracing::instrument(skip(self, participant_address))]
+    #[tracing::instrument(skip(self, dcps_sender))]
     pub async fn offered_deadline_missed(
         &mut self,
         publisher_handle: InstanceHandle,
         data_writer_handle: InstanceHandle,
         change_instance_handle: InstanceHandle,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
+        dcps_sender: MpscSender<DcpsMail>,
     ) {
         let current_time = self.get_current_time();
         let Some(publisher) = self
@@ -5676,11 +3071,9 @@ where
             .contains(&StatusKind::OfferedDeadlineMissed)
         {
             let status = data_writer.get_offered_deadline_missed_status().await;
-            let Ok(the_writer) = self.get_data_writer_async(
-                participant_address,
-                publisher_handle,
-                data_writer_handle,
-            ) else {
+            let Ok(the_writer) =
+                self.get_data_writer_async(dcps_sender, publisher_handle, data_writer_handle)
+            else {
                 return;
             };
 
@@ -5709,11 +3102,9 @@ where
             .listener_mask
             .contains(&StatusKind::OfferedDeadlineMissed)
         {
-            let Ok(the_writer) = self.get_data_writer_async(
-                participant_address,
-                publisher_handle,
-                data_writer_handle,
-            ) else {
+            let Ok(the_writer) =
+                self.get_data_writer_async(dcps_sender, publisher_handle, data_writer_handle)
+            else {
                 return;
             };
             let Some(publisher) = self
@@ -5742,11 +3133,9 @@ where
             .listener_mask
             .contains(&StatusKind::OfferedDeadlineMissed)
         {
-            let Ok(the_writer) = self.get_data_writer_async(
-                participant_address,
-                publisher_handle,
-                data_writer_handle,
-            ) else {
+            let Ok(the_writer) =
+                self.get_data_writer_async(dcps_sender, publisher_handle, data_writer_handle)
+            else {
                 return;
             };
 
@@ -5796,13 +3185,13 @@ where
             .await;
     }
 
-    #[tracing::instrument(skip(self, participant_address))]
+    #[tracing::instrument(skip(self, dcps_sender))]
     pub async fn requested_deadline_missed(
         &mut self,
         subscriber_handle: InstanceHandle,
         data_reader_handle: InstanceHandle,
         change_instance_handle: InstanceHandle,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
+        dcps_sender: MpscSender<DcpsMail>,
     ) {
         let current_time = self.get_current_time();
         let Some(subscriber) = self
@@ -5839,11 +3228,9 @@ where
             .contains(&StatusKind::RequestedDeadlineMissed)
         {
             let status = data_reader.get_requested_deadline_missed_status();
-            let Ok(the_reader) = self.get_data_reader_async(
-                participant_address,
-                subscriber_handle,
-                data_reader_handle,
-            ) else {
+            let Ok(the_reader) =
+                self.get_data_reader_async(dcps_sender, subscriber_handle, data_reader_handle)
+            else {
                 return;
             };
             let Some(subscriber) = self
@@ -5870,11 +3257,9 @@ where
             .listener_mask
             .contains(&StatusKind::RequestedDeadlineMissed)
         {
-            let Ok(the_reader) = self.get_data_reader_async(
-                participant_address,
-                subscriber_handle,
-                data_reader_handle,
-            ) else {
+            let Ok(the_reader) =
+                self.get_data_reader_async(dcps_sender, subscriber_handle, data_reader_handle)
+            else {
                 return;
             };
 
@@ -5904,11 +3289,9 @@ where
             .listener_mask
             .contains(&StatusKind::RequestedDeadlineMissed)
         {
-            let Ok(the_reader) = self.get_data_reader_async(
-                participant_address,
-                subscriber_handle,
-                data_reader_handle,
-            ) else {
+            let Ok(the_reader) =
+                self.get_data_reader_async(dcps_sender, subscriber_handle, data_reader_handle)
+            else {
                 return;
             };
 
@@ -5962,7 +3345,7 @@ where
     async fn add_discovered_participant(
         &mut self,
         discovered_participant_data: SpdpDiscoveredParticipantData,
-        participant_address: MpscSender<DcpsDomainParticipantMail>,
+        dcps_sender: MpscSender<DcpsMail>,
     ) {
         // Check that the domainId of the discovered participant equals the local one.
         // If it is not equal then there the local endpoints are not configured to
@@ -6005,7 +3388,7 @@ where
             self.add_matched_topics_detector(&discovered_participant_data);
             self.add_matched_topics_announcer(&discovered_participant_data);
 
-            self.announce_participant(participant_address).await;
+            self.announce_participant(dcps_sender).await;
 
             self.domain_participant
                 .add_discovered_participant(discovered_participant_data);

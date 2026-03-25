@@ -5,7 +5,7 @@ use super::{
 use crate::{
     dcps::{
         channels::{mpsc::MpscSender, oneshot::oneshot},
-        domain_participant_mail::{DcpsDomainParticipantMail, PublisherServiceMail},
+        dcps_mail::{DcpsMail, PublisherServiceMail},
         listeners::{
             data_writer_listener::DcpsDataWriterListener, publisher_listener::DcpsPublisherListener,
         },
@@ -44,8 +44,8 @@ impl PublisherAsync {
         }
     }
 
-    pub(crate) fn participant_address(&self) -> &MpscSender<DcpsDomainParticipantMail> {
-        self.participant.participant_address()
+    pub(crate) fn dcps_sender(&self) -> &MpscSender<DcpsMail> {
+        self.participant.dcps_sender()
     }
 }
 
@@ -62,15 +62,16 @@ impl PublisherAsync {
         let topic_name = a_topic.get_name();
         let dcps_listener = a_listener.map(DcpsDataWriterListener::new);
         let (reply_sender, reply_receiver) = oneshot();
-        self.participant_address()
-            .send(DcpsDomainParticipantMail::Publisher(
+        self.dcps_sender()
+            .send(DcpsMail::Publisher(
                 PublisherServiceMail::CreateDataWriter {
+                    participant_handle: self.participant.get_instance_handle(),
                     publisher_handle: self.handle,
                     topic_name,
                     qos,
                     dcps_listener,
                     mask: mask.to_vec(),
-                    participant_address: self.participant_address().clone(),
+                    dcps_sender: self.dcps_sender().clone(),
                     reply_sender,
                 },
             ))
@@ -92,11 +93,12 @@ impl PublisherAsync {
         a_datawriter: &DataWriterAsync<Foo>,
     ) -> DdsResult<()> {
         let (reply_sender, reply_receiver) = oneshot();
-        self.participant_address()
-            .send(DcpsDomainParticipantMail::Publisher(
+        self.dcps_sender()
+            .send(DcpsMail::Publisher(
                 PublisherServiceMail::DeleteDataWriter {
+                    participant_handle: self.participant.get_instance_handle(),
                     publisher_handle: self.handle,
-                    datawriter_handle: a_datawriter.get_instance_handle().await,
+                    datawriter_handle: a_datawriter.get_instance_handle(),
                     reply_sender,
                 },
             ))
@@ -159,9 +161,10 @@ impl PublisherAsync {
     #[tracing::instrument(skip(self))]
     pub async fn set_default_datawriter_qos(&self, qos: QosKind<DataWriterQos>) -> DdsResult<()> {
         let (reply_sender, reply_receiver) = oneshot();
-        self.participant_address()
-            .send(DcpsDomainParticipantMail::Publisher(
+        self.dcps_sender()
+            .send(DcpsMail::Publisher(
                 PublisherServiceMail::SetDefaultDataWriterQos {
+                    participant_handle: self.participant.get_instance_handle(),
                     publisher_handle: self.handle,
                     qos,
                     reply_sender,
@@ -175,9 +178,10 @@ impl PublisherAsync {
     #[tracing::instrument(skip(self))]
     pub async fn get_default_datawriter_qos(&self) -> DdsResult<DataWriterQos> {
         let (reply_sender, reply_receiver) = oneshot();
-        self.participant_address()
-            .send(DcpsDomainParticipantMail::Publisher(
+        self.dcps_sender()
+            .send(DcpsMail::Publisher(
                 PublisherServiceMail::GetDefaultDataWriterQos {
+                    participant_handle: self.participant.get_instance_handle(),
                     publisher_handle: self.handle,
                     reply_sender,
                 },
@@ -202,14 +206,13 @@ impl PublisherAsync {
     #[tracing::instrument(skip(self))]
     pub async fn set_qos(&self, qos: QosKind<PublisherQos>) -> DdsResult<()> {
         let (reply_sender, reply_receiver) = oneshot();
-        self.participant_address()
-            .send(DcpsDomainParticipantMail::Publisher(
-                PublisherServiceMail::SetPublisherQos {
-                    publisher_handle: self.handle,
-                    qos,
-                    reply_sender,
-                },
-            ))
+        self.dcps_sender()
+            .send(DcpsMail::Publisher(PublisherServiceMail::SetPublisherQos {
+                participant_handle: self.participant.get_instance_handle(),
+                publisher_handle: self.handle,
+                qos,
+                reply_sender,
+            }))
             .await?;
         reply_receiver.await?
     }
@@ -218,13 +221,12 @@ impl PublisherAsync {
     #[tracing::instrument(skip(self))]
     pub async fn get_qos(&self) -> DdsResult<PublisherQos> {
         let (reply_sender, reply_receiver) = oneshot();
-        self.participant_address()
-            .send(DcpsDomainParticipantMail::Publisher(
-                PublisherServiceMail::GetPublisherQos {
-                    publisher_handle: self.handle,
-                    reply_sender,
-                },
-            ))
+        self.dcps_sender()
+            .send(DcpsMail::Publisher(PublisherServiceMail::GetPublisherQos {
+                participant_handle: self.participant.get_instance_handle(),
+                publisher_handle: self.handle,
+                reply_sender,
+            }))
             .await?;
         reply_receiver.await?
     }
@@ -238,9 +240,10 @@ impl PublisherAsync {
     ) -> DdsResult<()> {
         let (reply_sender, reply_receiver) = oneshot();
         let dcps_listener = a_listener.map(DcpsPublisherListener::new);
-        self.participant_address()
-            .send(DcpsDomainParticipantMail::Publisher(
+        self.dcps_sender()
+            .send(DcpsMail::Publisher(
                 PublisherServiceMail::SetPublisherListener {
+                    participant_handle: self.participant.get_instance_handle(),
                     publisher_handle: self.handle,
                     dcps_listener,
                     mask: mask.to_vec(),
@@ -265,7 +268,7 @@ impl PublisherAsync {
 
     /// Async version of [`get_instance_handle`](crate::publication::publisher::Publisher::get_instance_handle).
     #[tracing::instrument(skip(self))]
-    pub async fn get_instance_handle(&self) -> InstanceHandle {
+    pub fn get_instance_handle(&self) -> InstanceHandle {
         self.handle
     }
 }
