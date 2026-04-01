@@ -4,8 +4,8 @@ use core::pin::Pin;
 use crate::{
     builtin_topics::PublicationBuiltinTopicData,
     dcps::{
-        channels::{mpsc::MpscSender, oneshot::oneshot},
-        dcps_domain_participant::{DcpsDomainParticipant, TransportReaderKind, poll_timeout},
+        channels::oneshot::oneshot,
+        dcps_domain_participant::{DcpsDomainParticipant, RtpsReaderKind, poll_timeout},
         dcps_mail::{DcpsMail, MessageServiceMail},
         listeners::data_reader_listener::DcpsDataReaderListener,
         status_condition_mail::DcpsStatusConditionMail,
@@ -216,13 +216,13 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
     //#[tracing::instrument(skip(self, dcps_sender))]
     pub fn wait_for_historical_data(
         &mut self,
-        dcps_sender: MpscSender<DcpsMail>,
         subscriber_handle: InstanceHandle,
         data_reader_handle: InstanceHandle,
         max_wait: Duration,
     ) -> Pin<Box<dyn Future<Output = DdsResult<()>> + Send>> {
         let participant_handle = self.domain_participant.instance_handle;
         let timer_handle = self.timer_handle.clone();
+        let dcps_sender = self.dcps_sender.clone();
         Box::pin(async move {
             poll_timeout(
                 timer_handle,
@@ -316,13 +316,12 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
         Ok(data_reader.get_matched_publications())
     }
 
-    #[tracing::instrument(skip(self, dcps_sender))]
+    #[tracing::instrument(skip(self))]
     pub async fn set_data_reader_qos(
         &mut self,
         subscriber_handle: InstanceHandle,
         data_reader_handle: InstanceHandle,
         qos: QosKind<DataReaderQos>,
-        dcps_sender: MpscSender<DcpsMail>,
     ) -> DdsResult<()> {
         let Some(subscriber) = self
             .domain_participant
@@ -352,7 +351,7 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
         data_reader.qos = qos;
 
         if data_reader.enabled {
-            self.announce_data_reader(subscriber_handle, data_reader_handle, dcps_sender)
+            self.announce_data_reader(subscriber_handle, data_reader_handle)
                 .await;
         }
         Ok(())
@@ -447,19 +446,18 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
             | DurabilityQosPolicyKind::Persistent => (),
         };
 
-        if let TransportReaderKind::Stateful(r) = &data_reader.transport_reader {
+        if let RtpsReaderKind::Stateful(r) = &data_reader.transport_reader {
             Ok(r.is_historical_data_received())
         } else {
             Ok(true)
         }
     }
 
-    #[tracing::instrument(skip(self, dcps_sender))]
+    #[tracing::instrument(skip(self))]
     pub async fn enable_data_reader(
         &mut self,
         subscriber_handle: InstanceHandle,
         data_reader_handle: InstanceHandle,
-        dcps_sender: MpscSender<DcpsMail>,
     ) -> DdsResult<()> {
         let Some(subscriber) = self
             .domain_participant
@@ -486,12 +484,11 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
                     discovered_writer_data,
                     subscriber_handle,
                     data_reader_handle,
-                    dcps_sender.clone(),
                 )
                 .await;
             }
 
-            self.announce_data_reader(subscriber_handle, data_reader_handle, dcps_sender)
+            self.announce_data_reader(subscriber_handle, data_reader_handle)
                 .await;
         }
         Ok(())
