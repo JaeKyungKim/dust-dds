@@ -95,9 +95,9 @@ use crate::{
         },
     },
     xtypes::{
-        binding::XTypesBinding,
         deserializer::CdrDeserializer,
-        dynamic_type::{DynamicData, DynamicDataFactory, DynamicType},
+        dynamic_type::{DynamicData, DynamicDataFactory, DynamicType, DynamicTypeMember},
+        error::XTypesError,
         serializer::{
             Cdr1BeSerializer, Cdr1LeSerializer, Cdr2BeSerializer, Cdr2LeSerializer,
             RtpsPlCdrSerializer,
@@ -234,10 +234,10 @@ where
         }
 
         // Create shared type information Arcs to avoid multiple allocations
-        let spdp_participant_type = Arc::new(SpdpDiscoveredParticipantData::get_type());
-        let discovered_topic_type = Arc::new(DiscoveredTopicData::get_type());
-        let discovered_writer_type = Arc::new(DiscoveredWriterData::get_type());
-        let discovered_reader_type = Arc::new(DiscoveredReaderData::get_type());
+        let spdp_participant_type = SpdpDiscoveredParticipantData::TYPE;
+        let discovered_topic_type = DiscoveredTopicData::TYPE;
+        let discovered_writer_type = DiscoveredWriterData::TYPE;
+        let discovered_reader_type = DiscoveredReaderData::TYPE;
 
         let mut topic_list = Vec::new();
 
@@ -268,7 +268,7 @@ where
             Actor::spawn::<R>(DcpsStatusCondition::default(), &spawner_handle),
             None,
             vec![],
-            Arc::clone(&spdp_participant_type),
+            spdp_participant_type,
         );
 
         topic_list.push(TopicDescriptionKind::Topic(spdp_topic_participant));
@@ -299,7 +299,7 @@ where
             Actor::spawn::<R>(DcpsStatusCondition::default(), &spawner_handle),
             None,
             vec![],
-            Arc::clone(&discovered_topic_type),
+            discovered_topic_type,
         );
 
         topic_list.push(TopicDescriptionKind::Topic(sedp_topic_topics));
@@ -330,7 +330,7 @@ where
             Actor::spawn::<R>(DcpsStatusCondition::default(), &spawner_handle),
             None,
             vec![],
-            Arc::clone(&discovered_writer_type),
+            discovered_writer_type,
         );
         topic_list.push(TopicDescriptionKind::Topic(sedp_topic_publications));
 
@@ -360,7 +360,7 @@ where
             Actor::spawn::<R>(DcpsStatusCondition::default(), &spawner_handle),
             None,
             vec![],
-            Arc::clone(&discovered_reader_type),
+            discovered_reader_type,
         );
         topic_list.push(TopicDescriptionKind::Topic(sedp_topic_subscriptions));
 
@@ -403,7 +403,7 @@ where
             InstanceHandle::new(rtps_stateless_reader.guid().into()),
             spdp_reader_qos,
             String::from(DCPS_PARTICIPANT),
-            Arc::clone(&spdp_participant_type),
+            spdp_participant_type,
             Actor::spawn::<R>(DcpsStatusCondition::default(), &spawner_handle),
             None,
             Vec::new(),
@@ -419,7 +419,7 @@ where
             InstanceHandle::new(dcps_topic_transport_reader.guid().into()),
             sedp_data_reader_qos(),
             String::from(DCPS_TOPIC),
-            Arc::clone(&discovered_topic_type),
+            discovered_topic_type,
             Actor::spawn::<R>(DcpsStatusCondition::default(), &spawner_handle),
             None,
             Vec::new(),
@@ -435,7 +435,7 @@ where
             InstanceHandle::new(dcps_publication_transport_reader.guid().into()),
             sedp_data_reader_qos(),
             String::from(DCPS_PUBLICATION),
-            Arc::clone(&discovered_writer_type),
+            discovered_writer_type,
             Actor::spawn::<R>(DcpsStatusCondition::default(), &spawner_handle),
             None,
             Vec::new(),
@@ -451,7 +451,7 @@ where
             InstanceHandle::new(dcps_subscription_transport_reader.guid().into()),
             sedp_data_reader_qos(),
             String::from(DCPS_SUBSCRIPTION),
-            Arc::clone(&discovered_reader_type),
+            discovered_reader_type,
             Actor::spawn::<R>(DcpsStatusCondition::default(), &spawner_handle),
             None,
             Vec::new(),
@@ -503,7 +503,7 @@ where
             RtpsWriterKind::Stateless(dcps_participant_transport_writer),
             String::from(DCPS_PARTICIPANT),
             "SpdpDiscoveredParticipantData".to_string(),
-            Arc::clone(&spdp_participant_type),
+            spdp_participant_type,
             Actor::spawn::<R>(DcpsStatusCondition::default(), &spawner_handle),
             None,
             vec![],
@@ -520,7 +520,7 @@ where
             RtpsWriterKind::Stateful(dcps_topics_transport_writer),
             String::from(DCPS_TOPIC),
             "DiscoveredTopicData".to_string(),
-            Arc::clone(&discovered_topic_type),
+            discovered_topic_type,
             Actor::spawn::<R>(DcpsStatusCondition::default(), &spawner_handle),
             None,
             vec![],
@@ -536,7 +536,7 @@ where
             RtpsWriterKind::Stateful(dcps_publications_transport_writer),
             String::from(DCPS_PUBLICATION),
             "DiscoveredWriterData".to_string(),
-            Arc::clone(&discovered_writer_type),
+            discovered_writer_type,
             Actor::spawn::<R>(DcpsStatusCondition::default(), &spawner_handle),
             None,
             vec![],
@@ -552,7 +552,7 @@ where
             RtpsWriterKind::Stateful(dcps_subscriptions_transport_writer),
             String::from(DCPS_SUBSCRIPTION),
             "DiscoveredReaderData".to_string(),
-            Arc::clone(&discovered_reader_type),
+            discovered_reader_type,
             Actor::spawn::<R>(DcpsStatusCondition::default(), &spawner_handle),
             None,
             vec![],
@@ -829,8 +829,7 @@ where
                 .find(|x| x.topic_name == DCPS_PARTICIPANT)
             {
                 let builtin_topic_key = *self.domain_participant.instance_handle.as_ref();
-                let mut dynamic_data =
-                    DynamicDataFactory::create_data(SpdpDiscoveredParticipantData::get_type());
+                let mut dynamic_data = DynamicDataFactory::create_data();
                 dynamic_data
                     .set_complex_value(
                         PID_PARTICIPANT_GUID as u32,
@@ -949,8 +948,7 @@ where
             .iter_mut()
             .find(|x| x.topic_name == DCPS_PUBLICATION)
         {
-            let mut dynamic_data =
-                DynamicDataFactory::create_data(DiscoveredWriterData::get_type());
+            let mut dynamic_data = DynamicDataFactory::create_data();
             dynamic_data
                 .set_complex_value(
                     PID_ENDPOINT_GUID as u32,
@@ -1080,8 +1078,7 @@ where
             .iter_mut()
             .find(|x| x.topic_name == DCPS_SUBSCRIPTION)
         {
-            let mut dynamic_data =
-                DynamicDataFactory::create_data(DiscoveredReaderData::get_type());
+            let mut dynamic_data = DynamicDataFactory::create_data();
             dynamic_data
                 .set_complex_value(
                     PID_ENDPOINT_GUID as u32,
@@ -2092,10 +2089,21 @@ where
         &mut self,
         cache_change: CacheChange,
     ) {
+        let spdp_type_support =
+            if let Some(TopicDescriptionKind::Topic(discovered_participant_data_type)) = self
+                .domain_participant
+                .topic_description_list
+                .iter()
+                .find(|n| n.topic_name() == DCPS_PARTICIPANT)
+            {
+                discovered_participant_data_type.type_support
+            } else {
+                return;
+            };
         match cache_change.kind {
             ChangeKind::Alive => {
                 if let Ok(dynamic_data) = CdrDeserializer::deserialize_builtin(
-                    SpdpDiscoveredParticipantData::get_type(),
+                    spdp_type_support,
                     cache_change.data_value.as_ref(),
                 ) {
                     let discovered_participant_data =
@@ -2109,7 +2117,7 @@ where
                 let discovered_participant_handle = if let Some(h) = cache_change.instance_handle {
                     InstanceHandle::new(h)
                 } else if let Ok(dynamic_data) = CdrDeserializer::deserialize(
-                    InstanceHandle::get_dynamic_type(),
+                    InstanceHandle::TYPE,
                     cache_change.data_value.as_ref(),
                 ) {
                     InstanceHandle::create_sample(dynamic_data)
@@ -2142,10 +2150,21 @@ where
         &mut self,
         cache_change: CacheChange,
     ) {
+        let sedp_writer_type_support =
+            if let Some(TopicDescriptionKind::Topic(discovered_participant_data_type)) = self
+                .domain_participant
+                .topic_description_list
+                .iter()
+                .find(|n| n.topic_name() == DCPS_PUBLICATION)
+            {
+                discovered_participant_data_type.type_support
+            } else {
+                return;
+            };
         match cache_change.kind {
             ChangeKind::Alive => {
                 if let Ok(dynamic_data) = CdrDeserializer::deserialize_builtin(
-                    DiscoveredWriterData::get_type(),
+                    sedp_writer_type_support,
                     cache_change.data_value.as_ref(),
                 ) {
                     let discovered_writer_data = DiscoveredWriterData::create_sample(dynamic_data);
@@ -2202,7 +2221,7 @@ where
                 let discovered_writer_handle = if let Some(h) = cache_change.instance_handle {
                     InstanceHandle::new(h)
                 } else if let Ok(dynamic_data) = CdrDeserializer::deserialize(
-                    InstanceHandle::get_dynamic_type(),
+                    InstanceHandle::TYPE,
                     cache_change.data_value.as_ref(),
                 ) {
                     InstanceHandle::create_sample(dynamic_data)
@@ -2250,10 +2269,21 @@ where
         &mut self,
         cache_change: CacheChange,
     ) {
+        let sedp_reader_type_support =
+            if let Some(TopicDescriptionKind::Topic(discovered_participant_data_type)) = self
+                .domain_participant
+                .topic_description_list
+                .iter()
+                .find(|n| n.topic_name() == DCPS_SUBSCRIPTION)
+            {
+                discovered_participant_data_type.type_support
+            } else {
+                return;
+            };
         match cache_change.kind {
             ChangeKind::Alive => {
                 if let Ok(dynamic_data) = CdrDeserializer::deserialize_builtin(
-                    DiscoveredReaderData::get_type(),
+                    sedp_reader_type_support,
                     cache_change.data_value.as_ref(),
                 ) {
                     let discovered_reader_data = DiscoveredReaderData::create_sample(dynamic_data);
@@ -2340,7 +2370,7 @@ where
                 let discovered_reader_handle = if let Some(h) = cache_change.instance_handle {
                     InstanceHandle::new(h)
                 } else if let Ok(dynamic_data) = CdrDeserializer::deserialize(
-                    InstanceHandle::get_dynamic_type(),
+                    InstanceHandle::TYPE,
                     cache_change.data_value.as_ref(),
                 ) {
                     InstanceHandle::create_sample(dynamic_data)
@@ -2386,10 +2416,21 @@ where
 
     #[tracing::instrument(skip(self))]
     pub async fn add_builtin_topics_detector_cache_change(&mut self, cache_change: CacheChange) {
+        let sedp_topic_type_support =
+            if let Some(TopicDescriptionKind::Topic(discovered_participant_data_type)) = self
+                .domain_participant
+                .topic_description_list
+                .iter()
+                .find(|n| n.topic_name() == DCPS_TOPIC)
+            {
+                discovered_participant_data_type.type_support
+            } else {
+                return;
+            };
         match cache_change.kind {
             ChangeKind::Alive => {
                 if let Ok(dynamic_data) = CdrDeserializer::deserialize_builtin(
-                    TopicBuiltinTopicData::get_type(),
+                    sedp_topic_type_support,
                     cache_change.data_value.as_ref(),
                 ) {
                     let topic_builtin_topic_data =
@@ -2485,7 +2526,7 @@ where
             {
                 if cache_change.kind == ChangeKind::Alive {
                     let Ok(data) = CdrDeserializer::deserialize(
-                        data_reader.type_support.as_ref().clone(),
+                        data_reader.type_support,
                         cache_change.data_value.as_ref(),
                     ) else {
                         return;
@@ -2532,11 +2573,14 @@ where
                     };
 
                     if let Some((variable_name, comparison_function)) = filter {
-                        let Some(member_id) = data.get_member_id_by_name(variable_name.trim())
+                        let Some(member_id) = data
+                            .get_member_id_by_name(data_reader.type_support, variable_name.trim())
                         else {
                             return;
                         };
-                        let Ok(member_descriptor) = data.get_descriptor(member_id) else {
+                        let Ok(member_descriptor) =
+                            data.get_descriptor(data_reader.type_support, member_id)
+                        else {
                             return;
                         };
                         match member_descriptor.r#type.get_kind() {
@@ -4096,7 +4140,7 @@ where
 }
 
 #[tracing::instrument(skip(type_support))]
-fn get_topic_kind(type_support: &DynamicType) -> TopicKind {
+fn get_topic_kind(type_support: &dyn DynamicType) -> TopicKind {
     for index in 0..type_support.get_member_count() {
         if let Ok(m) = type_support.get_member_by_index(index) {
             if let Ok(d) = m.get_descriptor() {
@@ -4591,7 +4635,7 @@ struct TopicEntity {
     status_condition: Actor<DcpsStatusCondition>,
     _listener_sender: Option<MpscSender<ListenerMail>>,
     _status_kind: Vec<StatusKind>,
-    type_support: Arc<DynamicType>,
+    type_support: &'static dyn DynamicType,
 }
 
 impl TopicEntity {
@@ -4604,7 +4648,7 @@ impl TopicEntity {
         status_condition: Actor<DcpsStatusCondition>,
         listener_sender: Option<MpscSender<ListenerMail>>,
         status_kind: Vec<StatusKind>,
-        type_support: Arc<DynamicType>,
+        type_support: &'static dyn DynamicType,
     ) -> Self {
         Self {
             qos,
@@ -4699,7 +4743,7 @@ struct DataWriterEntity {
     transport_writer: RtpsWriterKind,
     topic_name: String,
     type_name: String,
-    type_support: Arc<DynamicType>,
+    type_support: &'static dyn DynamicType,
     matched_subscription_list: Vec<SubscriptionBuiltinTopicData>,
     publication_matched_status: PublicationMatchedStatus,
     incompatible_subscription_list: Vec<InstanceHandle>,
@@ -4730,7 +4774,7 @@ impl DataWriterEntity {
         transport_writer: RtpsWriterKind,
         topic_name: String,
         type_name: String,
-        type_support: Arc<DynamicType>,
+        type_support: &'static dyn DynamicType,
         status_condition: Actor<DcpsStatusCondition>,
         listener_sender: Option<MpscSender<ListenerMail>>,
         listener_mask: Vec<StatusKind>,
@@ -4792,7 +4836,8 @@ impl DataWriterEntity {
             return Err(DdsError::IllegalOperation);
         }
 
-        let instance_handle = get_instance_handle_from_dynamic_data(dynamic_data.clone())?;
+        let instance_handle =
+            get_instance_handle_from_dynamic_data(self.type_support, dynamic_data.clone())?;
         if !self.registered_instance_list.contains(&instance_handle) {
             return Err(DdsError::BadParameter);
         }
@@ -4805,8 +4850,8 @@ impl DataWriterEntity {
             self.instance_publication_time.remove(i);
         }
 
-        dynamic_data.clear_nonkey_values()?;
-        let serialized_key = serialize(&dynamic_data, &self.qos.representation)?;
+        dynamic_data.clear_nonkey_values(self.type_support)?;
+        let serialized_key = serialize(self.type_support, &dynamic_data, &self.qos.representation)?;
 
         self.last_change_sequence_number += 1;
         let cache_change = CacheChange {
@@ -4854,7 +4899,8 @@ impl DataWriterEntity {
             return Err(DdsError::IllegalOperation);
         }
 
-        let instance_handle = get_instance_handle_from_dynamic_data(dynamic_data.clone())?;
+        let instance_handle =
+            get_instance_handle_from_dynamic_data(self.type_support, dynamic_data.clone())?;
         if !self.registered_instance_list.contains(&instance_handle) {
             return Err(DdsError::BadParameter);
         }
@@ -4867,8 +4913,8 @@ impl DataWriterEntity {
             self.instance_publication_time.remove(i);
         }
 
-        dynamic_data.clear_nonkey_values()?;
-        let serialized_key = serialize(&dynamic_data, &self.qos.representation)?;
+        dynamic_data.clear_nonkey_values(self.type_support)?;
+        let serialized_key = serialize(self.type_support, &dynamic_data, &self.qos.representation)?;
 
         self.last_change_sequence_number += 1;
         let kind = if self
@@ -5109,7 +5155,7 @@ struct DataReaderEntity {
     sample_list: Vec<ReaderSample>,
     qos: DataReaderQos,
     topic_name: String,
-    type_support: Arc<DynamicType>,
+    type_support: &'static dyn DynamicType,
     requested_deadline_missed_status: RequestedDeadlineMissedStatus,
     requested_incompatible_qos_status: RequestedIncompatibleQosStatus,
     sample_rejected_status: SampleRejectedStatus,
@@ -5132,7 +5178,7 @@ impl DataReaderEntity {
         instance_handle: InstanceHandle,
         qos: DataReaderQos,
         topic_name: String,
-        type_support: Arc<DynamicType>,
+        type_support: &'static dyn DynamicType,
         status_condition: Actor<DcpsStatusCondition>,
         listener_sender: Option<MpscSender<ListenerMail>>,
         listener_mask: Vec<StatusKind>,
@@ -5330,32 +5376,111 @@ impl DataReaderEntity {
         cache_change: CacheChange,
         reception_timestamp: Time,
     ) -> DdsResult<ReaderSample> {
+        struct KeyHolder<'a> {
+            descriptor: &'a crate::xtypes::dynamic_type::TypeDescriptor,
+            member_list: Vec<&'a DynamicTypeMember>,
+        }
+
+        impl<'a> DynamicType for KeyHolder<'a> {
+            fn get_descriptor(&self) -> &crate::xtypes::dynamic_type::TypeDescriptor {
+                self.descriptor
+            }
+
+            fn get_name(&self) -> crate::xtypes::dynamic_type::ObjectName<'static> {
+                self.descriptor.name
+            }
+
+            fn get_kind(&self) -> crate::xtypes::dynamic_type::TypeKind {
+                self.descriptor.kind
+            }
+
+            fn get_member_by_name(
+                &self,
+                name: crate::xtypes::dynamic_type::ObjectName,
+            ) -> Result<
+                &crate::xtypes::dynamic_type::DynamicTypeMember,
+                crate::xtypes::error::XTypesError,
+            > {
+                self.member_list
+                    .iter()
+                    .find(|x| x.get_name() == name)
+                    .copied()
+                    .ok_or(XTypesError::InvalidName)
+            }
+
+            fn get_member(
+                &self,
+                id: crate::xtypes::dynamic_type::MemberId,
+            ) -> Result<
+                &crate::xtypes::dynamic_type::DynamicTypeMember,
+                crate::xtypes::error::XTypesError,
+            > {
+                self.member_list
+                    .iter()
+                    .find(|x| x.get_id() == id)
+                    .copied()
+                    .ok_or(XTypesError::InvalidId(id))
+            }
+
+            fn get_member_count(&self) -> u32 {
+                self.member_list.len() as u32
+            }
+
+            fn get_member_by_index(
+                &self,
+                index: u32,
+            ) -> Result<
+                &crate::xtypes::dynamic_type::DynamicTypeMember,
+                crate::xtypes::error::XTypesError,
+            > {
+                self.member_list
+                    .get(index as usize)
+                    .copied()
+                    .ok_or(XTypesError::InvalidIndex(index))
+            }
+        }
+
+        fn create_key_holder<'a>(foo_type: &'a dyn DynamicType) -> DdsResult<KeyHolder<'a>> {
+            let key_holder_type_descriptor = foo_type.get_descriptor();
+            let mut key_member_list = Vec::new();
+            for member_index in 0..foo_type.get_member_count() {
+                let member = foo_type.get_member_by_index(member_index)?;
+                if member.get_descriptor()?.is_key {
+                    key_member_list.push(member);
+                }
+            }
+            Ok(KeyHolder {
+                descriptor: key_holder_type_descriptor,
+                member_list: key_member_list,
+            })
+        }
+
         let (data_value, instance_handle) = match cache_change.kind {
             ChangeKind::Alive | ChangeKind::AliveFiltered => {
                 let data_value = CdrDeserializer::deserialize(
-                    self.type_support.as_ref().clone(),
+                    self.type_support,
                     cache_change.data_value.as_ref(),
                 )?;
-                let instance_handle = get_instance_handle_from_dynamic_data(data_value.clone())?;
+                let instance_handle =
+                    get_instance_handle_from_dynamic_data(self.type_support, data_value.clone())?;
                 (data_value, instance_handle)
             }
             ChangeKind::NotAliveDisposed
             | ChangeKind::NotAliveUnregistered
             | ChangeKind::NotAliveDisposedUnregistered => match cache_change.instance_handle {
                 Some(i) => {
-                    let mut key_holder = self.type_support.as_ref().clone();
-                    key_holder.clear_nonkey_members();
-                    let data_value = DynamicDataFactory::create_data(key_holder);
+                    let data_value = DynamicDataFactory::create_data();
                     let instance_handle = InstanceHandle::new(i);
                     (data_value, instance_handle)
                 }
                 None => {
-                    let mut key_holder = self.type_support.as_ref().clone();
-                    key_holder.clear_nonkey_members();
-                    let data_value =
-                        CdrDeserializer::deserialize(key_holder, cache_change.data_value.as_ref())?;
+                    let key_holder = create_key_holder(self.type_support)?;
+                    let data_value = CdrDeserializer::deserialize(
+                        &key_holder,
+                        cache_change.data_value.as_ref(),
+                    )?;
                     let instance_handle =
-                        get_instance_handle_from_dynamic_data(data_value.clone())?;
+                        get_instance_handle_from_dynamic_data(&key_holder, data_value.clone())?;
                     (data_value, instance_handle)
                 }
             },
@@ -5933,24 +6058,25 @@ impl DataReaderEntity {
 }
 
 fn serialize(
+    dynamic_type: &dyn DynamicType,
     dynamic_data: &DynamicData,
     representation: &DataRepresentationQosPolicy,
 ) -> DdsResult<Vec<u8>> {
     Ok(
         if representation.value.is_empty() || representation.value[0] == XCDR_DATA_REPRESENTATION {
             if cfg!(target_endian = "big") {
-                Cdr1BeSerializer::serialize(dynamic_data)?
+                Cdr1BeSerializer::serialize(dynamic_type, dynamic_data)?
             } else {
-                Cdr1LeSerializer::serialize(dynamic_data)?
+                Cdr1LeSerializer::serialize(dynamic_type, dynamic_data)?
             }
         } else if representation.value[0] == XCDR2_DATA_REPRESENTATION {
             if cfg!(target_endian = "big") {
-                Cdr2BeSerializer::serialize(dynamic_data)?
+                Cdr2BeSerializer::serialize(dynamic_type, dynamic_data)?
             } else {
-                Cdr2LeSerializer::serialize(dynamic_data)?
+                Cdr2LeSerializer::serialize(dynamic_type, dynamic_data)?
             }
         } else if representation.value[0] == BUILT_IN_DATA_REPRESENTATION {
-            RtpsPlCdrSerializer::serialize(dynamic_data)?
+            RtpsPlCdrSerializer::serialize(dynamic_type, dynamic_data)?
         } else {
             panic!("Invalid data representation")
         },
