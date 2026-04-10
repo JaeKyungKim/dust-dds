@@ -1,6 +1,6 @@
 use crate::{
     dcps::{
-        channels::mpsc::MpscReceiver, dcps_participant_factory::DcpsParticipantFactory,
+        channels::oneshot::OneshotSender, dcps_participant_factory::DcpsParticipantFactory,
         status_condition::StatusConditionEntity,
     },
     infrastructure::{
@@ -288,10 +288,11 @@ impl<R: DdsRuntime, T: TransportParticipantFactory> DcpsParticipantFactory<R, T>
         Err(DdsError::AlreadyDeleted)
     }
 
-    pub async fn register_notification(
+    pub fn register_notification(
         &mut self,
         entity: StatusConditionEntity,
-    ) -> DdsResult<MpscReceiver<()>> {
+        notification_sender: OneshotSender<()>,
+    ) -> DdsResult<()> {
         match entity {
             StatusConditionEntity::Subscriber {
                 participant_handle,
@@ -307,7 +308,9 @@ impl<R: DdsRuntime, T: TransportParticipantFactory> DcpsParticipantFactory<R, T>
                     ))
                     .find(|s| s.instance_handle == subscriber_handle)
                     .ok_or(DdsError::AlreadyDeleted)?;
-                return Ok(s.status_condition.register_notification().await);
+                s.status_condition
+                    .register_notification(notification_sender);
+                return Ok(());
             }
             StatusConditionEntity::Topic {
                 participant_handle,
@@ -318,10 +321,10 @@ impl<R: DdsRuntime, T: TransportParticipantFactory> DcpsParticipantFactory<R, T>
                     match t {
                         super::TopicDescriptionKind::Topic(topic_entity) => {
                             if topic_entity.instance_handle == topic_handle {
-                                return Ok(topic_entity
+                                topic_entity
                                     .status_condition
-                                    .register_notification()
-                                    .await);
+                                    .register_notification(notification_sender);
+                                return Ok(());
                             }
                         }
                         super::TopicDescriptionKind::ContentFilteredTopic(_) => (),
@@ -346,7 +349,9 @@ impl<R: DdsRuntime, T: TransportParticipantFactory> DcpsParticipantFactory<R, T>
                     if p.instance_handle == publisher_handle {
                         for dw in p.data_writer_list.iter_mut() {
                             if dw.instance_handle == writer_handle {
-                                return Ok(dw.status_condition.register_notification().await);
+                                dw.status_condition
+                                    .register_notification(notification_sender);
+                                return Ok(());
                             }
                         }
                     }
@@ -369,7 +374,9 @@ impl<R: DdsRuntime, T: TransportParticipantFactory> DcpsParticipantFactory<R, T>
                     if s.instance_handle == subscriber_handle {
                         for dr in s.data_reader_list.iter_mut() {
                             if dr.instance_handle == reader_handle {
-                                return Ok(dr.status_condition.register_notification().await);
+                                dr.status_condition
+                                    .register_notification(notification_sender);
+                                return Ok(());
                             }
                         }
                     }

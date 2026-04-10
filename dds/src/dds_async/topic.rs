@@ -67,7 +67,7 @@ impl TopicAsync {
                     reply_sender,
                 },
             ))
-            .await?;
+            .await;
         reply_receiver.await?
     }
 }
@@ -105,7 +105,7 @@ impl TopicAsync {
                 topic_qos: qos,
                 reply_sender,
             }))
-            .await?;
+            .await;
 
         reply_receiver.await?
     }
@@ -121,7 +121,7 @@ impl TopicAsync {
                 topic_name: self.topic_name.clone(),
                 reply_sender,
             }))
-            .await?;
+            .await;
 
         reply_receiver.await?
     }
@@ -130,7 +130,7 @@ impl TopicAsync {
     #[tracing::instrument(skip(self))]
     pub fn get_statuscondition(&self) -> StatusConditionAsync {
         StatusConditionAsync::new(
-            self.participant.dcps_sender().clone(),
+            *self.participant.dcps_sender(),
             StatusConditionEntity::Topic {
                 participant_handle: self.get_participant().get_instance_handle(),
                 topic_handle: self.handle,
@@ -155,7 +155,7 @@ impl TopicAsync {
                 topic_name: self.topic_name.clone(),
                 reply_sender,
             }))
-            .await?;
+            .await;
         reply_receiver.await?
     }
 
@@ -188,7 +188,7 @@ impl TopicAsync {
                 topic_name: self.topic_name.clone(),
                 reply_sender,
             }))
-            .await?;
+            .await;
 
         reply_receiver.await?
     }

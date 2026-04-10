@@ -1,49 +1,51 @@
 use crate::{
     dcps::{
-        channels::{
-            mpsc::{MpscReceiver, MpscSender},
-            oneshot::oneshot,
-        },
+        channels::oneshot::{OneshotSender, oneshot},
         dcps_mail::{DcpsMail, StatusConditionMail},
         status_condition::StatusConditionEntity,
     },
+    dds_async::domain_participant_factory::DcpsSender,
     infrastructure::{error::DdsResult, status::StatusKind},
 };
 use alloc::vec::Vec;
 
 /// Async version of [`StatusCondition`](crate::infrastructure::condition::StatusCondition).
 pub struct StatusConditionAsync {
-    dcps_sender: MpscSender<DcpsMail>,
+    dcps_sender: DcpsSender,
     entity: StatusConditionEntity,
 }
 
 impl Clone for StatusConditionAsync {
     fn clone(&self) -> Self {
         Self {
-            dcps_sender: self.dcps_sender.clone(),
+            dcps_sender: self.dcps_sender,
             entity: self.entity.clone(),
         }
     }
 }
 
 impl StatusConditionAsync {
-    pub(crate) fn new(dcps_sender: MpscSender<DcpsMail>, entity: StatusConditionEntity) -> Self {
+    pub(crate) fn new(dcps_sender: DcpsSender, entity: StatusConditionEntity) -> Self {
         Self {
             dcps_sender,
             entity,
         }
     }
 
-    pub(crate) async fn register_notification(&self) -> DdsResult<MpscReceiver<()>> {
+    pub(crate) async fn register_notification(
+        &self,
+        notification_sender: OneshotSender<()>,
+    ) -> DdsResult<()> {
         let (reply_sender, reply_receiver) = oneshot();
         self.dcps_sender
             .send(DcpsMail::StatusCondition(
                 StatusConditionMail::RegisterNotification {
                     entity: self.entity.clone(),
+                    notification_sender,
                     reply_sender,
                 },
             ))
-            .await?;
+            .await;
         reply_receiver.await?
     }
 }
@@ -60,7 +62,7 @@ impl StatusConditionAsync {
                     reply_sender,
                 },
             ))
-            .await?;
+            .await;
         reply_receiver.await?
     }
 
@@ -76,7 +78,7 @@ impl StatusConditionAsync {
                     reply_sender,
                 },
             ))
-            .await?;
+            .await;
         reply_receiver.await?
     }
 
@@ -99,7 +101,7 @@ impl StatusConditionAsync {
                     reply_sender,
                 },
             ))
-            .await?;
+            .await;
         reply_receiver.await?
     }
 }

@@ -1,7 +1,7 @@
 use super::domain_participant::DomainParticipantAsync;
 use crate::{
     dcps::{
-        channels::{mpsc::MpscSender, oneshot::oneshot},
+        channels::oneshot::oneshot,
         dcps_mail::{DcpsMail, ParticipantFactoryMail},
         listeners::domain_participant_listener::DcpsDomainParticipantListener,
     },
@@ -18,12 +18,37 @@ use crate::{
     transport::interface::TransportParticipantFactory,
 };
 
+const DCPS_CHANNEL_SIZE: usize = 256;
+
+#[doc(hidden)]
+pub type DcpsChannel = embassy_sync::channel::Channel<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    DcpsMail,
+    DCPS_CHANNEL_SIZE,
+>;
+
+#[doc(hidden)]
+pub type DcpsSender = embassy_sync::channel::Sender<
+    'static,
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    DcpsMail,
+    DCPS_CHANNEL_SIZE,
+>;
+
+#[doc(hidden)]
+pub type DcpsReceiver = embassy_sync::channel::Receiver<
+    'static,
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    DcpsMail,
+    DCPS_CHANNEL_SIZE,
+>;
+
 /// Async version of [`DomainParticipantFactory`](crate::domain::domain_participant_factory::DomainParticipantFactory).
 /// Unlike the sync version, the [`DomainParticipantFactoryAsync`] is not a singleton and can be created by means of
 /// a constructor by passing a DDS runtime. This allows the factory
 /// to spin tasks on an existing runtime which can be shared with other things outside Dust DDS.
 pub struct DomainParticipantFactoryAsync {
-    dcps_sender: MpscSender<DcpsMail>,
+    dcps_sender: DcpsSender,
 }
 
 impl DomainParticipantFactoryAsync {
@@ -48,12 +73,12 @@ impl DomainParticipantFactoryAsync {
                     reply_sender,
                 },
             ))
-            .await?;
+            .await;
 
         let participant_handle = reply_receiver.await??;
 
         let domain_participant =
-            DomainParticipantAsync::new(self.dcps_sender.clone(), domain_id, participant_handle);
+            DomainParticipantAsync::new(self.dcps_sender, domain_id, participant_handle);
 
         Ok(domain_participant)
     }
@@ -70,7 +95,7 @@ impl DomainParticipantFactoryAsync {
                     reply_sender,
                 },
             ))
-            .await?;
+            .await;
         reply_receiver.await?
     }
 
@@ -92,7 +117,7 @@ impl DomainParticipantFactoryAsync {
             .send(DcpsMail::ParticipantFactory(
                 ParticipantFactoryMail::SetDefaultParticipantQos { qos, reply_sender },
             ))
-            .await?;
+            .await;
         reply_receiver.await?
     }
 
@@ -103,7 +128,7 @@ impl DomainParticipantFactoryAsync {
             .send(DcpsMail::ParticipantFactory(
                 ParticipantFactoryMail::GetDefaultParticipantQos { reply_sender },
             ))
-            .await?;
+            .await;
         reply_receiver.await
     }
 
@@ -114,7 +139,7 @@ impl DomainParticipantFactoryAsync {
             .send(DcpsMail::ParticipantFactory(
                 ParticipantFactoryMail::SetQos { qos, reply_sender },
             ))
-            .await?;
+            .await;
         reply_receiver.await?
     }
 
@@ -125,7 +150,7 @@ impl DomainParticipantFactoryAsync {
             .send(DcpsMail::ParticipantFactory(
                 ParticipantFactoryMail::GetQos { reply_sender },
             ))
-            .await?;
+            .await;
         reply_receiver.await
     }
 
@@ -135,7 +160,7 @@ impl DomainParticipantFactoryAsync {
             .send(DcpsMail::ParticipantFactory(
                 ParticipantFactoryMail::SetConfiguration { configuration },
             ))
-            .await?;
+            .await;
         Ok(())
     }
 
@@ -146,7 +171,7 @@ impl DomainParticipantFactoryAsync {
             .send(DcpsMail::ParticipantFactory(
                 ParticipantFactoryMail::GetConfiguration { reply_sender },
             ))
-            .await?;
+            .await;
         reply_receiver.await
     }
 }
@@ -164,6 +189,7 @@ impl DomainParticipantFactoryAsync {
 
         static PARTICIPANT_FACTORY_ASYNC: OnceLock<DomainParticipantFactoryAsync> = OnceLock::new();
         PARTICIPANT_FACTORY_ASYNC.get_or_init(|| {
+
             let executor = crate::std_runtime::executor::Executor::new();
             let timer_driver = crate::std_runtime::timer::TimerDriver::new();
             let runtime = crate::std_runtime::StdRuntime::new(executor, timer_driver);
@@ -201,21 +227,26 @@ impl DomainParticipantFactoryAsync {
         host_id: [u8; 4],
         transport: T,
     ) -> DomainParticipantFactoryAsync {
+        static DCPS_CHANNEL: DcpsChannel = DcpsChannel::new();
         let spawner_handle = runtime.spawner();
-        let (dcps_sender, mailbox_recv) = crate::dcps::channels::mpsc::mpsc_channel();
+
         let mut domain_participant_factory =
             crate::dcps::dcps_participant_factory::DcpsParticipantFactory::new(
                 app_id,
                 host_id,
                 runtime,
                 transport,
-                dcps_sender.clone(),
+                DCPS_CHANNEL.sender(),
             );
+        let dcps_receiver = DCPS_CHANNEL.receiver();
         spawner_handle.spawn(async move {
-            while let Some(m) = mailbox_recv.receive().await {
-                domain_participant_factory.handle(m).await;
+            loop {
+                let m = dcps_receiver.receive().await;
+                domain_participant_factory.handle(m);
             }
         });
-        DomainParticipantFactoryAsync { dcps_sender }
+        DomainParticipantFactoryAsync {
+            dcps_sender: DCPS_CHANNEL.sender(),
+        }
     }
 }

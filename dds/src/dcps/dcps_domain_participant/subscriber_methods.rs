@@ -10,7 +10,6 @@ use crate::{
             data_reader_listener::DcpsDataReaderListener,
             subscriber_listener::DcpsSubscriberListener,
         },
-        status_condition::DcpsStatusCondition,
     },
     infrastructure::{
         error::{DdsError, DdsResult},
@@ -30,7 +29,7 @@ use crate::{
 impl<R: DdsRuntime> DcpsDomainParticipant<R> {
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(skip(self, dcps_listener))]
-    pub async fn create_data_reader(
+    pub fn create_data_reader(
         &mut self,
         subscriber_handle: InstanceHandle,
         topic_name: String,
@@ -127,8 +126,6 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
         let transport_reader =
             RtpsReaderKind::Stateful(RtpsStatefulReader::new(guid, reliablity_kind));
 
-        let status_condition = DcpsStatusCondition::default();
-
         let listener_mask = mask.to_vec();
         let listener_sender = dcps_listener.map(|l| l.spawn::<R>(&self.spawner_handle));
         let data_reader = DataReaderEntity::new(
@@ -136,7 +133,6 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
             qos,
             topic_name,
             type_support,
-            status_condition,
             listener_sender,
             listener_mask,
             transport_reader,
@@ -147,14 +143,13 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
         subscriber.data_reader_list.push(data_reader);
 
         if subscriber.enabled && subscriber.qos.entity_factory.autoenable_created_entities {
-            self.enable_data_reader(subscriber_handle, data_reader_handle)
-                .await?;
+            self.enable_data_reader(subscriber_handle, data_reader_handle)?;
         }
         Ok(data_reader_handle)
     }
 
     #[tracing::instrument(skip(self))]
-    pub async fn delete_data_reader(
+    pub fn delete_data_reader(
         &mut self,
         subscriber_handle: InstanceHandle,
         datareader_handle: InstanceHandle,
@@ -174,7 +169,7 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
             .position(|x| x.instance_handle == datareader_handle)
         {
             let data_reader = subscriber.data_reader_list.remove(index);
-            self.announce_deleted_data_reader(data_reader).await;
+            self.announce_deleted_data_reader(data_reader);
         } else {
             return Err(DdsError::AlreadyDeleted);
         };

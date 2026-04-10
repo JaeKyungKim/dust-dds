@@ -133,7 +133,6 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
             QosKind::Default => self.domain_participant.default_subscriber_qos.clone(),
             QosKind::Specific(q) => q,
         };
-        let status_condition = DcpsStatusCondition::default();
         let subscriber_handle = InstanceHandle::new([
             self.domain_participant.instance_handle[0],
             self.domain_participant.instance_handle[1],
@@ -162,7 +161,6 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
             subscriber_handle,
             subscriber_qos,
             data_reader_list,
-            status_condition,
             listener_sender,
             listener_mask,
         );
@@ -222,7 +220,7 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
 
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(skip(self, dcps_listener, type_support))]
-    pub async fn create_topic(
+    pub fn create_topic(
         &mut self,
         topic_name: String,
         type_name: String,
@@ -291,7 +289,7 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
                 .entity_factory
                 .autoenable_created_entities
         {
-            self.enable_topic(topic_name).await?;
+            self.enable_topic(topic_name)?;
         }
 
         Ok(topic_handle)
@@ -350,7 +348,7 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
     }
 
     #[tracing::instrument(skip(self))]
-    pub async fn create_content_filtered_topic(
+    pub fn create_content_filtered_topic(
         &mut self,
         participant_handle: InstanceHandle,
         name: String,
@@ -515,7 +513,7 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
 
     /// Ignore participant with the specified [`handle`](InstanceHandle).
     #[tracing::instrument(skip(self))]
-    pub async fn ignore_participant(&mut self, handle: InstanceHandle) -> DdsResult<()> {
+    pub fn ignore_participant(&mut self, handle: InstanceHandle) -> DdsResult<()> {
         // Check enabled
         if !self.domain_participant.enabled {
             return Err(DdsError::NotEnabled);
@@ -528,7 +526,7 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
         }
 
         // Remove participant
-        self.remove_discovered_participant(handle).await;
+        self.remove_discovered_participant(handle);
 
         Ok(())
     }
@@ -554,7 +552,7 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
     }
 
     #[tracing::instrument(skip(self))]
-    pub async fn delete_participant_contained_entities(&mut self) -> DdsResult<()> {
+    pub fn delete_participant_contained_entities(&mut self) -> DdsResult<()> {
         let deleted_publisher_list: Vec<PublisherEntity> = self
             .domain_participant
             .user_defined_publisher_list
@@ -562,7 +560,7 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
             .collect();
         for mut publisher in deleted_publisher_list {
             for data_writer in publisher.data_writer_list.drain(..) {
-                self.announce_deleted_data_writer(data_writer).await;
+                self.announce_deleted_data_writer(data_writer);
             }
         }
 
@@ -573,7 +571,7 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
             .collect();
         for mut subscriber in deleted_subscriber_list {
             for data_reader in subscriber.data_reader_list.drain(..) {
-                self.announce_deleted_data_reader(data_reader).await;
+                self.announce_deleted_data_reader(data_reader);
             }
         }
 
@@ -699,7 +697,7 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
     }
 
     #[tracing::instrument(skip(self))]
-    pub async fn set_domain_participant_qos(
+    pub fn set_domain_participant_qos(
         &mut self,
         qos: QosKind<DomainParticipantQos>,
     ) -> DdsResult<()> {
@@ -710,7 +708,7 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
 
         self.domain_participant.qos = qos;
         if self.domain_participant.enabled {
-            self.announce_participant().await;
+            self.announce_participant();
         }
         Ok(())
     }
@@ -734,7 +732,7 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
     }
 
     #[tracing::instrument(skip(self))]
-    pub async fn enable_domain_participant(&mut self) -> DdsResult<()> {
+    pub fn enable_domain_participant(&mut self) -> DdsResult<()> {
         if !self.domain_participant.enabled {
             for t in &mut self.domain_participant.topic_description_list {
                 if let TopicDescriptionKind::Topic(t) = t {
@@ -752,7 +750,7 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
             self.domain_participant.builtin_subscriber.enabled = true;
             self.domain_participant.enabled = true;
 
-            self.announce_participant().await;
+            self.announce_participant();
         }
 
         Ok(())

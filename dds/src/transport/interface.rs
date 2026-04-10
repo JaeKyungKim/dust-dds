@@ -1,32 +1,22 @@
 use crate::{
-    dcps::{
-        channels::mpsc::MpscSender,
-        dcps_mail::{DcpsMail, MessageServiceMail},
-    },
+    dcps::dcps_mail::{DcpsMail, MessageServiceMail},
+    dds_async::domain_participant_factory::DcpsSender,
     infrastructure::instance::InstanceHandle,
     transport::types::Locator,
 };
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::{future::Future, pin::Pin};
 
 pub trait WriteMessage {
-    fn write_message(
-        &self,
-        buf: &[u8],
-        locators: &[Locator],
-    ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    fn write_message(&self, buf: &[u8], locators: &[Locator]);
 }
 
 #[derive(Clone)]
 pub struct TransportDataReceiver {
     participant_handle: InstanceHandle,
-    dcps_sender: MpscSender<DcpsMail>,
+    dcps_sender: DcpsSender,
 }
 impl TransportDataReceiver {
-    pub(crate) fn new(
-        participant_handle: InstanceHandle,
-        dcps_sender: MpscSender<DcpsMail>,
-    ) -> Self {
+    pub(crate) fn new(participant_handle: InstanceHandle, dcps_sender: DcpsSender) -> Self {
         Self {
             participant_handle,
             dcps_sender,
@@ -39,8 +29,7 @@ impl TransportDataReceiver {
                 participant_handle: self.participant_handle,
                 data_message,
             }))
-            .await
-            .ok();
+            .await;
     }
 }
 
@@ -57,5 +46,5 @@ pub trait TransportParticipantFactory: Send + 'static {
         &mut self,
         domain_id: i32,
         data_receiver: TransportDataReceiver,
-    ) -> impl Future<Output = RtpsTransportParticipant> + Send;
+    ) -> RtpsTransportParticipant;
 }

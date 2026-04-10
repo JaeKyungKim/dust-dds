@@ -1,11 +1,10 @@
 use crate::{
     dcps::{
-        channels::mpsc::MpscSender,
         dcps_domain_participant::DcpsDomainParticipant,
         dcps_mail::{DcpsMail, DiscoveryServiceMail, MessageServiceMail},
         listeners::domain_participant_listener::DcpsDomainParticipantListener,
     },
-    dds_async::configuration::DustDdsConfiguration,
+    dds_async::{configuration::DustDdsConfiguration, domain_participant_factory::DcpsSender},
     infrastructure::{
         domain::DomainId,
         error::{DdsError, DdsResult},
@@ -31,7 +30,7 @@ pub struct DcpsParticipantFactory<R: DdsRuntime, T> {
     entity_counter: u32,
     app_id: [u8; 4],
     host_id: [u8; 4],
-    dcps_sender: MpscSender<DcpsMail>,
+    dcps_sender: DcpsSender,
 }
 
 impl<R: DdsRuntime, T: TransportParticipantFactory> DcpsParticipantFactory<R, T> {
@@ -40,7 +39,7 @@ impl<R: DdsRuntime, T: TransportParticipantFactory> DcpsParticipantFactory<R, T>
         host_id: [u8; 4],
         runtime: R,
         transport: T,
-        dcps_sender: MpscSender<DcpsMail>,
+        dcps_sender: DcpsSender,
     ) -> Self {
         Self {
             domain_participant_list: Default::default(),
@@ -82,7 +81,7 @@ impl<R: DdsRuntime, T: TransportParticipantFactory> DcpsParticipantFactory<R, T>
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn create_participant(
+    pub fn create_participant(
         &mut self,
         domain_id: DomainId,
         qos: QosKind<DomainParticipantQos>,
@@ -96,13 +95,10 @@ impl<R: DdsRuntime, T: TransportParticipantFactory> DcpsParticipantFactory<R, T>
 
         let guid_prefix = self.create_new_guid_prefix();
         let participant_handle = InstanceHandle::from(Guid::new(guid_prefix, ENTITYID_PARTICIPANT));
-        let transport = self
-            .transport
-            .create_participant(
-                domain_id,
-                TransportDataReceiver::new(participant_handle, self.dcps_sender.clone()),
-            )
-            .await;
+        let transport = self.transport.create_participant(
+            domain_id,
+            TransportDataReceiver::new(participant_handle, self.dcps_sender),
+        );
 
         let clock_handle = self.runtime.clock();
         let mut timer_handle = self.runtime.timer();
@@ -118,7 +114,7 @@ impl<R: DdsRuntime, T: TransportParticipantFactory> DcpsParticipantFactory<R, T>
             listener_sender,
             status_kind,
             transport,
-            self.dcps_sender.clone(),
+            self.dcps_sender,
             clock_handle,
             timer_handle.clone(),
             spawner_handle.clone(),
@@ -128,19 +124,19 @@ impl<R: DdsRuntime, T: TransportParticipantFactory> DcpsParticipantFactory<R, T>
         //****** Spawn the participant actor and tasks **********//
 
         // Start the regular participant announcement task
-        let dcps_sender_clone = self.dcps_sender.clone();
+        let dcps_sender_clone = self.dcps_sender;
         let mut timer_handle_clone = timer_handle.clone();
         let participant_announcement_interval =
             self.configuration.participant_announcement_interval();
 
         spawner_handle.spawn(async move {
-            while dcps_sender_clone
-                .send(DcpsMail::Discovery(
-                    DiscoveryServiceMail::AnnounceParticipant { participant_handle },
-                ))
-                .await
-                .is_ok()
-            {
+            loop {
+                dcps_sender_clone
+                    .send(DcpsMail::Discovery(
+                        DiscoveryServiceMail::AnnounceParticipant { participant_handle },
+                    ))
+                    .await;
+
                 timer_handle_clone
                     .delay(participant_announcement_interval)
                     .await;
@@ -148,15 +144,15 @@ impl<R: DdsRuntime, T: TransportParticipantFactory> DcpsParticipantFactory<R, T>
         });
 
         // Start regular message writing
-        let dcps_sender_clone = self.dcps_sender.clone();
+        let dcps_sender_clone = self.dcps_sender;
         spawner_handle.spawn(async move {
-            while dcps_sender_clone
-                .send(DcpsMail::Message(MessageServiceMail::Poke {
-                    participant_handle,
-                }))
-                .await
-                .is_ok()
-            {
+            loop {
+                dcps_sender_clone
+                    .send(DcpsMail::Message(MessageServiceMail::Poke {
+                        participant_handle,
+                    }))
+                    .await;
+
                 timer_handle
                     .delay(core::time::Duration::from_millis(50))
                     .await;
@@ -164,7 +160,7 @@ impl<R: DdsRuntime, T: TransportParticipantFactory> DcpsParticipantFactory<R, T>
         });
 
         if self.qos.entity_factory.autoenable_created_entities {
-            dcps_participant.enable_domain_participant().await?;
+            dcps_participant.enable_domain_participant()?;
         }
 
         self.domain_participant_list.push(dcps_participant);
@@ -172,10 +168,7 @@ impl<R: DdsRuntime, T: TransportParticipantFactory> DcpsParticipantFactory<R, T>
         Ok(participant_handle)
     }
 
-    pub async fn delete_participant(
-        &mut self,
-        participant_handle: InstanceHandle,
-    ) -> DdsResult<()> {
+    pub fn delete_participant(&mut self, participant_handle: InstanceHandle) -> DdsResult<()> {
         let index = self
             .domain_participant_list
             .iter()
@@ -187,7 +180,7 @@ impl<R: DdsRuntime, T: TransportParticipantFactory> DcpsParticipantFactory<R, T>
             )));
         }
         let mut participant = self.domain_participant_list.remove(index);
-        participant.announce_deleted_participant().await;
+        participant.announce_deleted_participant();
         Ok(())
     }
 

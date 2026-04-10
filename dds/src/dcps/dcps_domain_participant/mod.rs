@@ -35,8 +35,8 @@ use crate::{
     dds_async::{
         content_filtered_topic::ContentFilteredTopicAsync, data_reader::DataReaderAsync,
         data_writer::DataWriterAsync, domain_participant::DomainParticipantAsync,
-        publisher::PublisherAsync, subscriber::SubscriberAsync, topic::TopicAsync,
-        topic_description::TopicDescriptionAsync,
+        domain_participant_factory::DcpsSender, publisher::PublisherAsync,
+        subscriber::SubscriberAsync, topic::TopicAsync, topic_description::TopicDescriptionAsync,
     },
     infrastructure::{
         domain::DomainId,
@@ -172,7 +172,7 @@ pub struct DcpsDomainParticipant<R: DdsRuntime> {
     clock_handle: R::ClockHandle,
     timer_handle: R::TimerHandle,
     spawner_handle: R::SpawnerHandle,
-    dcps_sender: MpscSender<DcpsMail>,
+    dcps_sender: DcpsSender,
 }
 
 impl<R> DcpsDomainParticipant<R>
@@ -188,7 +188,7 @@ where
         listener_sender: Option<MpscSender<ListenerMail>>,
         status_kind: Vec<StatusKind>,
         transport: RtpsTransportParticipant,
-        dcps_sender: MpscSender<DcpsMail>,
+        dcps_sender: DcpsSender,
         clock_handle: R::ClockHandle,
         timer_handle: R::TimerHandle,
         spawner_handle: R::SpawnerHandle,
@@ -231,6 +231,8 @@ where
                 ..Default::default()
             }
         }
+
+        let mut data_reader_list = Vec::with_capacity(4);
 
         // Create shared type information Arcs to avoid multiple allocations
         let spdp_participant_type = SpdpDiscoveredParticipantData::TYPE;
@@ -403,11 +405,11 @@ where
             spdp_reader_qos,
             String::from(DCPS_PARTICIPANT),
             spdp_participant_type,
-            DcpsStatusCondition::default(),
             None,
             Vec::new(),
             RtpsReaderKind::Stateless(rtps_stateless_reader),
         );
+        data_reader_list.push(dcps_participant_reader);
 
         let dcps_topic_transport_reader = RtpsStatefulReader::new(
             Guid::new(guid_prefix, ENTITYID_SEDP_BUILTIN_TOPICS_DETECTOR),
@@ -419,11 +421,11 @@ where
             sedp_data_reader_qos(),
             String::from(DCPS_TOPIC),
             discovered_topic_type,
-            DcpsStatusCondition::default(),
             None,
             Vec::new(),
             RtpsReaderKind::Stateful(dcps_topic_transport_reader),
         );
+        data_reader_list.push(dcps_topic_reader);
 
         let dcps_publication_transport_reader = RtpsStatefulReader::new(
             Guid::new(guid_prefix, ENTITYID_SEDP_BUILTIN_PUBLICATIONS_DETECTOR),
@@ -435,11 +437,11 @@ where
             sedp_data_reader_qos(),
             String::from(DCPS_PUBLICATION),
             discovered_writer_type,
-            DcpsStatusCondition::default(),
             None,
             Vec::new(),
             RtpsReaderKind::Stateful(dcps_publication_transport_reader),
         );
+        data_reader_list.push(dcps_publication_reader);
 
         let dcps_subscription_transport_reader = RtpsStatefulReader::new(
             Guid::new(guid_prefix, ENTITYID_SEDP_BUILTIN_SUBSCRIPTIONS_DETECTOR),
@@ -451,18 +453,12 @@ where
             sedp_data_reader_qos(),
             String::from(DCPS_SUBSCRIPTION),
             discovered_reader_type,
-            DcpsStatusCondition::default(),
             None,
             Vec::new(),
             RtpsReaderKind::Stateful(dcps_subscription_transport_reader),
         );
+        data_reader_list.push(dcps_subscription_reader);
 
-        let data_reader_list = vec![
-            dcps_participant_reader,
-            dcps_topic_reader,
-            dcps_publication_reader,
-            dcps_subscription_reader,
-        ];
         let builtin_subscriber_handle = [
             participant_handle[0],
             participant_handle[1],
@@ -485,7 +481,6 @@ where
             InstanceHandle::new(builtin_subscriber_handle),
             SubscriberQos::default(),
             data_reader_list,
-            DcpsStatusCondition::default(),
             None,
             vec![],
         );
@@ -503,7 +498,6 @@ where
             String::from(DCPS_PARTICIPANT),
             "SpdpDiscoveredParticipantData".to_string(),
             spdp_participant_type,
-            DcpsStatusCondition::default(),
             None,
             vec![],
             spdp_writer_qos,
@@ -520,7 +514,6 @@ where
             String::from(DCPS_TOPIC),
             "DiscoveredTopicData".to_string(),
             discovered_topic_type,
-            DcpsStatusCondition::default(),
             None,
             vec![],
             sedp_data_writer_qos(),
@@ -536,7 +529,6 @@ where
             String::from(DCPS_PUBLICATION),
             "DiscoveredWriterData".to_string(),
             discovered_writer_type,
-            DcpsStatusCondition::default(),
             None,
             vec![],
             sedp_data_writer_qos(),
@@ -552,7 +544,6 @@ where
             String::from(DCPS_SUBSCRIPTION),
             "DiscoveredReaderData".to_string(),
             discovered_reader_type,
-            DcpsStatusCondition::default(),
             None,
             vec![],
             sedp_data_writer_qos(),
@@ -618,7 +609,7 @@ where
 
     fn get_participant_async(&self) -> DomainParticipantAsync {
         DomainParticipantAsync::new(
-            self.dcps_sender.clone(),
+            self.dcps_sender,
             self.domain_participant.domain_id,
             self.domain_participant.instance_handle,
         )
@@ -736,7 +727,7 @@ where
     }
 
     #[tracing::instrument(skip(self))]
-    pub async fn announce_participant(&mut self) {
+    pub fn announce_participant(&mut self) {
         if self.domain_participant.enabled {
             let builtin_topic_key = *self.domain_participant.instance_handle.as_ref();
             let guid = Guid::from(builtin_topic_key);
@@ -796,13 +787,12 @@ where
                 spdp_discovered_participant_data.create_dynamic_sample(),
                 timestamp,
                 reply_sender,
-            )
-            .await;
+            );
         }
     }
 
     #[tracing::instrument(skip(self))]
-    pub async fn announce_deleted_participant(&mut self) {
+    pub fn announce_deleted_participant(&mut self) {
         if self.domain_participant.enabled {
             let timestamp = self.get_current_time();
             if let Some(dw) = self
@@ -830,14 +820,13 @@ where
                     self.transport.message_writer.as_ref(),
                     &self.clock_handle,
                 )
-                .await
                 .ok();
             }
         }
     }
 
     #[tracing::instrument(skip(self))]
-    async fn announce_data_writer(
+    fn announce_data_writer(
         &mut self,
         publisher_handle: InstanceHandle,
         data_writer_handle: InstanceHandle,
@@ -918,12 +907,11 @@ where
             discovered_writer_data.create_dynamic_sample(),
             timestamp,
             reply_sender,
-        )
-        .await;
+        );
     }
 
     #[tracing::instrument(skip(self, data_writer))]
-    async fn announce_deleted_data_writer(&mut self, data_writer: DataWriterEntity) {
+    fn announce_deleted_data_writer(&mut self, data_writer: DataWriterEntity) {
         let timestamp = self.get_current_time();
         if let Some(dw) = self
             .domain_participant
@@ -949,13 +937,12 @@ where
                 self.transport.message_writer.as_ref(),
                 &self.clock_handle,
             )
-            .await
             .ok();
         }
     }
 
     #[tracing::instrument(skip(self))]
-    async fn announce_data_reader(
+    fn announce_data_reader(
         &mut self,
         subscriber_handle: InstanceHandle,
         data_reader_handle: InstanceHandle,
@@ -1048,12 +1035,11 @@ where
             discovered_reader_data.create_dynamic_sample(),
             timestamp,
             reply_sender,
-        )
-        .await;
+        );
     }
 
     #[tracing::instrument(skip(self, data_reader))]
-    async fn announce_deleted_data_reader(&mut self, data_reader: DataReaderEntity) {
+    fn announce_deleted_data_reader(&mut self, data_reader: DataReaderEntity) {
         let timestamp = self.get_current_time();
         if let Some(dw) = self
             .domain_participant
@@ -1078,13 +1064,12 @@ where
                 self.transport.message_writer.as_ref(),
                 &self.clock_handle,
             )
-            .await
             .ok();
         }
     }
 
     #[tracing::instrument(skip(self))]
-    async fn announce_topic(&mut self, topic_name: String) {
+    fn announce_topic(&mut self, topic_name: String) {
         let Some(TopicDescriptionKind::Topic(topic)) = self
             .domain_participant
             .topic_description_list
@@ -1132,12 +1117,11 @@ where
             discovered_topic_data.create_dynamic_sample(),
             timestamp,
             reply_sender,
-        )
-        .await;
+        );
     }
 
     #[tracing::instrument(skip(self))]
-    async fn add_discovered_reader(
+    fn add_discovered_reader(
         &mut self,
         discovered_reader_data: DiscoveredReaderData,
         publisher_handle: InstanceHandle,
@@ -1329,7 +1313,6 @@ where
                         };
                         if let Some(l) = &data_writer.listener_sender {
                             l.send(ListenerMail::PublicationMatched { the_writer, status })
-                                .await
                                 .ok();
                         }
                     } else if publisher
@@ -1359,7 +1342,6 @@ where
                         let status = data_writer.get_publication_matched_status();
                         if let Some(l) = &publisher.listener_sender {
                             l.send(ListenerMail::PublicationMatched { the_writer, status })
-                                .await
                                 .ok();
                         }
                     } else if self
@@ -1390,7 +1372,6 @@ where
                         let status = data_writer.get_publication_matched_status();
                         if let Some(l) = &self.domain_participant.listener_sender {
                             l.send(ListenerMail::PublicationMatched { the_writer, status })
-                                .await
                                 .ok();
                         }
                     }
@@ -1412,8 +1393,7 @@ where
                     };
                     data_writer
                         .status_condition
-                        .add_communication_state(StatusKind::PublicationMatched)
-                        .await;
+                        .add_communication_state(StatusKind::PublicationMatched);
                 } else {
                     data_writer.add_incompatible_subscription(
                         InstanceHandle::new(
@@ -1449,7 +1429,6 @@ where
                         };
                         if let Some(l) = &data_writer.listener_sender {
                             l.send(ListenerMail::OfferedIncompatibleQos { the_writer, status })
-                                .await
                                 .ok();
                         }
                     } else if publisher
@@ -1479,7 +1458,6 @@ where
                         let status = data_writer.get_offered_incompatible_qos_status();
                         if let Some(l) = &publisher.listener_sender {
                             l.send(ListenerMail::OfferedIncompatibleQos { the_writer, status })
-                                .await
                                 .ok();
                         }
                     } else if self
@@ -1510,7 +1488,6 @@ where
                         let status = data_writer.get_offered_incompatible_qos_status();
                         if let Some(l) = &self.domain_participant.listener_sender {
                             l.send(ListenerMail::OfferedIncompatibleQos { the_writer, status })
-                                .await
                                 .ok();
                         }
                     }
@@ -1532,15 +1509,14 @@ where
                     };
                     data_writer
                         .status_condition
-                        .add_communication_state(StatusKind::OfferedIncompatibleQos)
-                        .await;
+                        .add_communication_state(StatusKind::OfferedIncompatibleQos);
                 }
             }
         }
     }
 
     #[tracing::instrument(skip(self))]
-    async fn remove_discovered_reader(
+    fn remove_discovered_reader(
         &mut self,
         subscription_handle: InstanceHandle,
         publisher_handle: InstanceHandle,
@@ -1570,13 +1546,12 @@ where
 
             data_writer
                 .status_condition
-                .add_communication_state(StatusKind::PublicationMatched)
-                .await;
+                .add_communication_state(StatusKind::PublicationMatched);
         }
     }
 
     #[tracing::instrument(skip(self))]
-    async fn add_discovered_writer(
+    fn add_discovered_writer(
         &mut self,
         discovered_writer_data: DiscoveredWriterData,
         subscriber_handle: InstanceHandle,
@@ -1779,7 +1754,6 @@ where
                         let status = data_reader.get_subscription_matched_status();
                         if let Some(l) = &data_reader.listener_sender {
                             l.send(ListenerMail::SubscriptionMatched { the_reader, status })
-                                .await
                                 .ok();
                         }
                     } else if subscriber
@@ -1809,7 +1783,6 @@ where
                         let status = data_reader.get_subscription_matched_status();
                         if let Some(l) = &subscriber.listener_sender {
                             l.send(ListenerMail::SubscriptionMatched { the_reader, status })
-                                .await
                                 .ok();
                         }
                     } else if self
@@ -1840,7 +1813,6 @@ where
                         let status = data_reader.get_subscription_matched_status();
                         if let Some(l) = &self.domain_participant.listener_sender {
                             l.send(ListenerMail::SubscriptionMatched { the_reader, status })
-                                .await
                                 .ok();
                         }
                     }
@@ -1862,8 +1834,7 @@ where
                     };
                     data_reader
                         .status_condition
-                        .add_communication_state(StatusKind::SubscriptionMatched)
-                        .await;
+                        .add_communication_state(StatusKind::SubscriptionMatched);
                 } else {
                     data_reader.add_requested_incompatible_qos(
                         InstanceHandle::new(
@@ -1899,7 +1870,6 @@ where
                         };
                         if let Some(l) = &data_reader.listener_sender {
                             l.send(ListenerMail::RequestedIncompatibleQos { the_reader, status })
-                                .await
                                 .ok();
                         }
                     } else if subscriber
@@ -1929,7 +1899,6 @@ where
                         let status = data_reader.get_requested_incompatible_qos_status();
                         if let Some(l) = &subscriber.listener_sender {
                             l.send(ListenerMail::RequestedIncompatibleQos { the_reader, status })
-                                .await
                                 .ok();
                         }
                     } else if self
@@ -1960,7 +1929,6 @@ where
                         let status = data_reader.get_requested_incompatible_qos_status();
                         if let Some(l) = &self.domain_participant.listener_sender {
                             l.send(ListenerMail::RequestedIncompatibleQos { the_reader, status })
-                                .await
                                 .ok();
                         }
                     }
@@ -1982,15 +1950,14 @@ where
                     };
                     data_reader
                         .status_condition
-                        .add_communication_state(StatusKind::RequestedIncompatibleQos)
-                        .await;
+                        .add_communication_state(StatusKind::RequestedIncompatibleQos);
                 }
             }
         }
     }
 
     #[tracing::instrument(skip(self))]
-    async fn remove_discovered_writer(
+    fn remove_discovered_writer(
         &mut self,
         publication_handle: InstanceHandle,
         subscriber_handle: InstanceHandle,
@@ -2016,14 +1983,12 @@ where
             .iter()
             .any(|x| &x.key().value == publication_handle.as_ref())
         {
-            data_reader
-                .remove_matched_publication(&publication_handle)
-                .await;
+            data_reader.remove_matched_publication(&publication_handle);
         }
     }
 
     #[tracing::instrument(skip(self))]
-    async fn add_cache_change(
+    fn add_cache_change(
         &mut self,
         cache_change: CacheChange,
         subscriber_handle: InstanceHandle,
@@ -2033,36 +1998,26 @@ where
         match reader_guid.entity_id() {
             ENTITYID_SPDP_BUILTIN_PARTICIPANT_READER => {
                 self.add_builtin_participants_detector_cache_change(cache_change)
-                    .await
             }
             ENTITYID_SEDP_BUILTIN_PUBLICATIONS_DETECTOR => {
                 self.add_builtin_publications_detector_cache_change(cache_change)
-                    .await
             }
             ENTITYID_SEDP_BUILTIN_SUBSCRIPTIONS_DETECTOR => {
                 self.add_builtin_subscriptions_detector_cache_change(cache_change)
-                    .await
             }
             ENTITYID_SEDP_BUILTIN_TOPICS_DETECTOR => {
                 self.add_builtin_topics_detector_cache_change(cache_change)
-                    .await
             }
-            _ => {
-                self.add_user_defined_cache_change(
-                    cache_change,
-                    subscriber_handle,
-                    data_reader_handle,
-                )
-                .await
-            }
+            _ => self.add_user_defined_cache_change(
+                cache_change,
+                subscriber_handle,
+                data_reader_handle,
+            ),
         }
     }
 
     #[tracing::instrument(skip(self))]
-    pub async fn add_builtin_participants_detector_cache_change(
-        &mut self,
-        cache_change: CacheChange,
-    ) {
+    pub fn add_builtin_participants_detector_cache_change(&mut self, cache_change: CacheChange) {
         let spdp_type_support =
             if let Some(TopicDescriptionKind::Topic(discovered_participant_data_type)) = self
                 .domain_participant
@@ -2083,8 +2038,7 @@ where
                     let discovered_participant_data =
                         SpdpDiscoveredParticipantData::create_sample(dynamic_data);
 
-                    self.add_discovered_participant(discovered_participant_data)
-                        .await;
+                    self.add_discovered_participant(discovered_participant_data);
                 }
             }
             ChangeKind::NotAliveDisposed | ChangeKind::NotAliveDisposedUnregistered => {
@@ -2099,8 +2053,7 @@ where
                     return;
                 };
 
-                self.remove_discovered_participant(discovered_participant_handle)
-                    .await;
+                self.remove_discovered_participant(discovered_participant_handle);
             }
             ChangeKind::AliveFiltered | ChangeKind::NotAliveUnregistered => (), // Do nothing,
         }
@@ -2120,10 +2073,7 @@ where
     }
 
     #[tracing::instrument(skip(self))]
-    pub async fn add_builtin_publications_detector_cache_change(
-        &mut self,
-        cache_change: CacheChange,
-    ) {
+    pub fn add_builtin_publications_detector_cache_change(&mut self, cache_change: CacheChange) {
         let sedp_writer_type_support =
             if let Some(TopicDescriptionKind::Topic(discovered_participant_data_type)) = self
                 .domain_participant
@@ -2186,8 +2136,7 @@ where
                             discovered_writer_data.clone(),
                             subscriber_handle,
                             data_reader_handle,
-                        )
-                        .await;
+                        );
                     }
                 }
             }
@@ -2217,8 +2166,7 @@ where
                         discovered_writer_handle,
                         subscriber_handle,
                         data_reader_handle,
-                    )
-                    .await;
+                    );
                 }
             }
             ChangeKind::AliveFiltered | ChangeKind::NotAliveUnregistered => (),
@@ -2239,10 +2187,7 @@ where
     }
 
     #[tracing::instrument(skip(self))]
-    pub async fn add_builtin_subscriptions_detector_cache_change(
-        &mut self,
-        cache_change: CacheChange,
-    ) {
+    pub fn add_builtin_subscriptions_detector_cache_change(&mut self, cache_change: CacheChange) {
         let sedp_reader_type_support =
             if let Some(TopicDescriptionKind::Topic(discovered_participant_data_type)) = self
                 .domain_participant
@@ -2335,8 +2280,7 @@ where
                             discovered_reader_data.clone(),
                             publisher_handle,
                             data_writer_handle,
-                        )
-                        .await;
+                        );
                     }
                 }
             }
@@ -2367,8 +2311,7 @@ where
                         discovered_reader_handle,
                         publisher_handle,
                         data_writer_handle,
-                    )
-                    .await;
+                    );
                 }
             }
             ChangeKind::AliveFiltered | ChangeKind::NotAliveUnregistered => (),
@@ -2389,7 +2332,7 @@ where
     }
 
     #[tracing::instrument(skip(self))]
-    pub async fn add_builtin_topics_detector_cache_change(&mut self, cache_change: CacheChange) {
+    pub fn add_builtin_topics_detector_cache_change(&mut self, cache_change: CacheChange) {
         let sedp_topic_type_support =
             if let Some(TopicDescriptionKind::Topic(discovered_participant_data_type)) = self
                 .domain_participant
@@ -2425,8 +2368,7 @@ where
                                 topic.inconsistent_topic_status.total_count_change += 1;
                                 topic
                                     .status_condition
-                                    .add_communication_state(StatusKind::InconsistentTopic)
-                                    .await;
+                                    .add_communication_state(StatusKind::InconsistentTopic);
                             }
                         }
                     }
@@ -2453,7 +2395,7 @@ where
     }
 
     #[tracing::instrument(skip(self))]
-    pub async fn add_user_defined_cache_change(
+    pub fn add_user_defined_cache_change(
         &mut self,
         cache_change: CacheChange,
         subscriber_handle: InstanceHandle,
@@ -2615,7 +2557,7 @@ where
                         data_reader.qos.deadline.period
                     {
                         let mut timer_handle = self.timer_handle.clone();
-                        let dcps_sender = self.dcps_sender.clone();
+                        let dcps_sender = self.dcps_sender;
 
                         self.spawner_handle.spawn(async move {
                             loop {
@@ -2629,8 +2571,7 @@ where
                                             change_instance_handle,
                                         },
                                     ))
-                                    .await
-                                    .ok();
+                                    .await;
                             }
                         });
                     }
@@ -2665,9 +2606,7 @@ where
                         };
 
                         if let Some(l) = &subscriber.listener_sender {
-                            l.send(ListenerMail::DataOnReaders { the_subscriber })
-                                .await
-                                .ok();
+                            l.send(ListenerMail::DataOnReaders { the_subscriber }).ok();
                         }
                     } else if data_reader_on_data_available_active {
                         let Ok(the_reader) =
@@ -2693,9 +2632,7 @@ where
                         };
                         if let Some(l) = &data_reader.listener_sender {
                             info!("Triggering data reader DataAvailable listener");
-                            l.send(ListenerMail::DataAvailable { the_reader })
-                                .await
-                                .ok();
+                            l.send(ListenerMail::DataAvailable { the_reader }).ok();
                         }
                     }
 
@@ -2710,8 +2647,7 @@ where
 
                     subscriber
                         .status_condition
-                        .add_communication_state(StatusKind::DataOnReaders)
-                        .await;
+                        .add_communication_state(StatusKind::DataOnReaders);
                     let Some(data_reader) = subscriber
                         .data_reader_list
                         .iter_mut()
@@ -2721,8 +2657,7 @@ where
                     };
                     data_reader
                         .status_condition
-                        .add_communication_state(StatusKind::DataAvailable)
-                        .await;
+                        .add_communication_state(StatusKind::DataAvailable);
                 }
                 Ok(AddChangeResult::NotAdded) => (), // Do nothing
                 Ok(AddChangeResult::Rejected(instance_handle, sample_rejected_status_kind)) => {
@@ -2760,7 +2695,6 @@ where
                         };
                         if let Some(l) = &data_reader.listener_sender {
                             l.send(ListenerMail::SampleRejected { the_reader, status })
-                                .await
                                 .ok();
                         };
                     } else if subscriber
@@ -2791,7 +2725,6 @@ where
                         let status = data_reader.get_sample_rejected_status();
                         if let Some(l) = &subscriber.listener_sender {
                             l.send(ListenerMail::SampleRejected { status, the_reader })
-                                .await
                                 .ok();
                         }
                     } else if self
@@ -2823,7 +2756,6 @@ where
                         let status = data_reader.get_sample_rejected_status();
                         if let Some(l) = &self.domain_participant.listener_sender {
                             l.send(ListenerMail::SampleRejected { status, the_reader })
-                                .await
                                 .ok();
                         }
                     }
@@ -2846,8 +2778,7 @@ where
                     };
                     data_reader
                         .status_condition
-                        .add_communication_state(StatusKind::SampleRejected)
-                        .await;
+                        .add_communication_state(StatusKind::SampleRejected);
                 }
                 Err(_) => (),
             }
@@ -2855,7 +2786,7 @@ where
     }
 
     #[tracing::instrument(skip(self))]
-    pub async fn remove_writer_change(
+    pub fn remove_writer_change(
         &mut self,
         publisher_handle: InstanceHandle,
         data_writer_handle: InstanceHandle,
@@ -2872,13 +2803,13 @@ where
                 .iter_mut()
                 .find(|x| x.instance_handle == data_writer_handle)
             {
-                dw.transport_writer.remove_change(sequence_number).await;
+                dw.transport_writer.remove_change(sequence_number);
             }
         }
     }
 
     #[tracing::instrument(skip(self))]
-    pub async fn offered_deadline_missed(
+    pub fn offered_deadline_missed(
         &mut self,
         publisher_handle: InstanceHandle,
         data_writer_handle: InstanceHandle,
@@ -2926,7 +2857,7 @@ where
             .listener_mask
             .contains(&StatusKind::OfferedDeadlineMissed)
         {
-            let status = data_writer.get_offered_deadline_missed_status().await;
+            let status = data_writer.get_offered_deadline_missed_status();
             let Ok(the_writer) = self.get_data_writer_async(publisher_handle, data_writer_handle)
             else {
                 return;
@@ -2950,7 +2881,6 @@ where
 
             if let Some(l) = &data_writer.listener_sender {
                 l.send(ListenerMail::OfferedDeadlineMissed { the_writer, status })
-                    .await
                     .ok();
             }
         } else if publisher
@@ -2976,10 +2906,9 @@ where
             else {
                 return;
             };
-            let status = data_writer.get_offered_deadline_missed_status().await;
+            let status = data_writer.get_offered_deadline_missed_status();
             if let Some(l) = &publisher.listener_sender {
                 l.send(ListenerMail::OfferedDeadlineMissed { the_writer, status })
-                    .await
                     .ok();
             }
         } else if self
@@ -3007,10 +2936,9 @@ where
             else {
                 return;
             };
-            let status = data_writer.get_offered_deadline_missed_status().await;
+            let status = data_writer.get_offered_deadline_missed_status();
             if let Some(l) = &self.domain_participant.listener_sender {
                 l.send(ListenerMail::OfferedDeadlineMissed { the_writer, status })
-                    .await
                     .ok();
             }
         }
@@ -3032,12 +2960,11 @@ where
         };
         data_writer
             .status_condition
-            .add_communication_state(StatusKind::OfferedDeadlineMissed)
-            .await;
+            .add_communication_state(StatusKind::OfferedDeadlineMissed);
     }
 
     #[tracing::instrument(skip(self))]
-    pub async fn requested_deadline_missed(
+    pub fn requested_deadline_missed(
         &mut self,
         subscriber_handle: InstanceHandle,
         data_reader_handle: InstanceHandle,
@@ -3099,7 +3026,6 @@ where
             };
             if let Some(l) = &data_reader.listener_sender {
                 l.send(ListenerMail::RequestedDeadlineMissed { the_reader, status })
-                    .await
                     .ok();
             }
         } else if subscriber
@@ -3129,7 +3055,6 @@ where
             let status = data_reader.get_requested_deadline_missed_status();
             if let Some(l) = &subscriber.listener_sender {
                 l.send(ListenerMail::RequestedDeadlineMissed { status, the_reader })
-                    .await
                     .ok();
             }
         } else if self
@@ -3160,7 +3085,6 @@ where
             let status = data_reader.get_requested_deadline_missed_status();
             if let Some(l) = &self.domain_participant.listener_sender {
                 l.send(ListenerMail::RequestedDeadlineMissed { status, the_reader })
-                    .await
                     .ok();
             }
         }
@@ -3182,12 +3106,11 @@ where
 
         data_reader
             .status_condition
-            .add_communication_state(StatusKind::RequestedDeadlineMissed)
-            .await;
+            .add_communication_state(StatusKind::RequestedDeadlineMissed);
     }
 
     #[tracing::instrument(skip(self))]
-    async fn add_discovered_participant(
+    fn add_discovered_participant(
         &mut self,
         discovered_participant_data: SpdpDiscoveredParticipantData,
     ) {
@@ -3232,7 +3155,7 @@ where
             self.add_matched_topics_detector(&discovered_participant_data);
             self.add_matched_topics_announcer(&discovered_participant_data);
 
-            self.announce_participant().await;
+            self.announce_participant();
 
             self.domain_participant
                 .add_discovered_participant(discovered_participant_data);
@@ -3241,7 +3164,7 @@ where
 
     /// Remove discovered [domain participant](SpdpDiscoveredParticipantData) with the speficied [handle](InstanceHandle).
     #[tracing::instrument(skip(self))]
-    async fn remove_discovered_participant(&mut self, handle: InstanceHandle) {
+    fn remove_discovered_participant(&mut self, handle: InstanceHandle) {
         self.domain_participant
             .discovered_participant_list
             .retain(|domain_participant| {
@@ -3702,26 +3625,23 @@ where
     }
 
     #[tracing::instrument(skip(self, data_message))]
-    pub async fn handle_data(&mut self, data_message: Arc<[u8]>) {
+    pub fn handle_data(&mut self, data_message: Arc<[u8]>) {
         if let Ok(rtps_message) = RtpsMessageRead::try_from(data_message.as_ref()) {
             let mut message_receiver = MessageReceiver::new(&rtps_message);
 
             while let Some(submessage) = message_receiver.next() {
                 match submessage {
                     RtpsSubmessageReadKind::Data(data_submessage) => {
-                        self.handle_data_submessage(&message_receiver, data_submessage)
-                            .await;
+                        self.handle_data_submessage(&message_receiver, data_submessage);
                     }
                     RtpsSubmessageReadKind::DataFrag(data_frag_submessage) => {
-                        self.handle_data_frag_submessage(&message_receiver, data_frag_submessage)
-                            .await;
+                        self.handle_data_frag_submessage(&message_receiver, data_frag_submessage);
                     }
                     RtpsSubmessageReadKind::Gap(gap_submessage) => {
                         self.handle_gap_submessage(&message_receiver, gap_submessage);
                     }
                     RtpsSubmessageReadKind::Heartbeat(heartbeat_submessage) => {
-                        self.handle_heartbeat_submessage(&message_receiver, heartbeat_submessage)
-                            .await;
+                        self.handle_heartbeat_submessage(&message_receiver, heartbeat_submessage);
                     }
                     RtpsSubmessageReadKind::HeartbeatFrag(heartbeat_frag_submessage) => {
                         for subscriber in self
@@ -3775,7 +3695,6 @@ where
                                             self.transport.message_writer.as_ref(),
                                             &self.clock_handle,
                                         )
-                                        .await
                                         .is_some()
                                         {
                                             if let Some(x) = dw.acknowledgement_notification.take()
@@ -3811,14 +3730,12 @@ where
                         {
                             for dw in &mut publisher.data_writer_list {
                                 match &mut dw.transport_writer {
-                                    RtpsWriterKind::Stateful(w) => {
-                                        w.on_nack_frag_submessage_received(
+                                    RtpsWriterKind::Stateful(w) => w
+                                        .on_nack_frag_submessage_received(
                                             nack_frag_submessage,
                                             message_receiver.source_guid_prefix(),
                                             self.transport.message_writer.as_ref(),
-                                        )
-                                        .await
-                                    }
+                                        ),
                                     RtpsWriterKind::Stateless(_) => (),
                                 }
                             }
@@ -3830,7 +3747,7 @@ where
         }
     }
 
-    async fn handle_data_submessage(
+    fn handle_data_submessage(
         &mut self,
         message_receiver: &MessageReceiver<'_>,
         data_submessage: &DataSubmessage,
@@ -3869,13 +3786,11 @@ where
                                         ) {
                                             let subscriber_handle = subscriber.instance_handle;
                                             let reader_handle = dr.instance_handle;
-                                            return self
-                                                .add_cache_change(
-                                                    change,
-                                                    subscriber_handle,
-                                                    reader_handle,
-                                                )
-                                                .await;
+                                            return self.add_cache_change(
+                                                change,
+                                                subscriber_handle,
+                                                reader_handle,
+                                            );
                                         }
                                     }
                                 }
@@ -3891,13 +3806,11 @@ where
                                         ) {
                                             let subscriber_handle = subscriber.instance_handle;
                                             let reader_handle = dr.instance_handle;
-                                            return self
-                                                .add_cache_change(
-                                                    change,
-                                                    subscriber_handle,
-                                                    reader_handle,
-                                                )
-                                                .await;
+                                            return self.add_cache_change(
+                                                change,
+                                                subscriber_handle,
+                                                reader_handle,
+                                            );
                                         }
                                     }
                                 }
@@ -3917,9 +3830,11 @@ where
                                 // because all readers would get changes marked with ENTITYID_UNKNOWN
                                 let subscriber_handle = subscriber.instance_handle;
                                 let reader_handle = dr.instance_handle;
-                                return self
-                                    .add_cache_change(change, subscriber_handle, reader_handle)
-                                    .await;
+                                return self.add_cache_change(
+                                    change,
+                                    subscriber_handle,
+                                    reader_handle,
+                                );
                             }
                         }
                     }
@@ -3967,7 +3882,7 @@ where
         }
     }
 
-    async fn handle_heartbeat_submessage(
+    fn handle_heartbeat_submessage(
         &mut self,
         message_receiver: &MessageReceiver<'_>,
         heartbeat_submessage: &HeartbeatSubmessage,
@@ -4003,12 +3918,10 @@ where
                                         && writer_proxy.missing_changes().count() > 0);
                                 writer_proxy.set_must_send_acknacks(must_send_acknacks);
 
-                                writer_proxy
-                                    .write_message(
-                                        &reader_guid,
-                                        self.transport.message_writer.as_ref(),
-                                    )
-                                    .await;
+                                writer_proxy.write_message(
+                                    &reader_guid,
+                                    self.transport.message_writer.as_ref(),
+                                );
                             }
                         }
                     }
@@ -4018,7 +3931,7 @@ where
         }
     }
 
-    async fn handle_data_frag_submessage(
+    fn handle_data_frag_submessage(
         &mut self,
         message_receiver: &MessageReceiver<'_>,
         data_frag_submessage: &DataFragSubmessage,
@@ -4062,8 +3975,7 @@ where
                                 writer_proxy.delete_data_fragments(data_submessage.writer_sn());
 
                                 return self
-                                    .handle_data_submessage(message_receiver, &data_submessage)
-                                    .await;
+                                    .handle_data_submessage(message_receiver, &data_submessage);
                             }
                         };
                     }
@@ -4073,7 +3985,7 @@ where
         }
     }
 
-    pub async fn poke(&mut self) {
+    pub fn poke(&mut self) {
         for publisher in self
             .domain_participant
             .user_defined_publisher_list
@@ -4084,14 +3996,8 @@ where
         {
             for dw in &mut publisher.data_writer_list {
                 match &mut dw.transport_writer {
-                    RtpsWriterKind::Stateful(writer) => {
-                        writer
-                            .write_message(
-                                self.transport.message_writer.as_ref(),
-                                &self.clock_handle,
-                            )
-                            .await
-                    }
+                    RtpsWriterKind::Stateful(writer) => writer
+                        .write_message(self.transport.message_writer.as_ref(), &self.clock_handle),
                     RtpsWriterKind::Stateless(_writer) => {}
                 }
             }
@@ -4546,11 +4452,10 @@ struct SubscriberEntity {
 }
 
 impl SubscriberEntity {
-    const fn new(
+    fn new(
         instance_handle: InstanceHandle,
         qos: SubscriberQos,
         data_reader_list: Vec<DataReaderEntity>,
-        status_condition: DcpsStatusCondition,
         listener_sender: Option<MpscSender<ListenerMail>>,
         listener_mask: Vec<StatusKind>,
     ) -> Self {
@@ -4560,7 +4465,7 @@ impl SubscriberEntity {
             data_reader_list,
             enabled: false,
             default_data_reader_qos: DataReaderQos::const_default(),
-            status_condition,
+            status_condition: DcpsStatusCondition::default(),
             listener_sender,
             listener_mask,
         }
@@ -4665,19 +4570,19 @@ impl RtpsWriterKind {
         }
     }
 
-    async fn add_change(
+    fn add_change(
         &mut self,
         cache_change: CacheChange,
         message_writer: &(impl WriteMessage + ?Sized),
         clock: &impl Clock,
     ) {
         match self {
-            RtpsWriterKind::Stateful(w) => w.add_change(cache_change, message_writer, clock).await,
-            RtpsWriterKind::Stateless(w) => w.add_change(cache_change, message_writer).await,
+            RtpsWriterKind::Stateful(w) => w.add_change(cache_change, message_writer, clock),
+            RtpsWriterKind::Stateless(w) => w.add_change(cache_change, message_writer),
         }
     }
 
-    async fn remove_change(&mut self, sequence_number: i64) {
+    fn remove_change(&mut self, sequence_number: i64) {
         match self {
             RtpsWriterKind::Stateful(w) => w.remove_change(sequence_number),
             RtpsWriterKind::Stateless(w) => w.remove_change(sequence_number),
@@ -4726,13 +4631,12 @@ struct DataWriterEntity {
 
 impl DataWriterEntity {
     #[allow(clippy::too_many_arguments)]
-    const fn new(
+    fn new(
         instance_handle: InstanceHandle,
         transport_writer: RtpsWriterKind,
         topic_name: String,
         type_name: String,
         type_support: &'static dyn DynamicType,
-        status_condition: DcpsStatusCondition,
         listener_sender: Option<MpscSender<ListenerMail>>,
         listener_mask: Vec<StatusKind>,
         qos: DataWriterQos,
@@ -4748,7 +4652,7 @@ impl DataWriterEntity {
             incompatible_subscription_list: Vec::new(),
             offered_incompatible_qos_status: OfferedIncompatibleQosStatus::const_default(),
             enabled: false,
-            status_condition,
+            status_condition: DcpsStatusCondition::default(),
             listener_sender,
             listener_mask,
             max_seq_num: None,
@@ -4763,7 +4667,7 @@ impl DataWriterEntity {
         }
     }
 
-    async fn dispose_w_timestamp(
+    fn dispose_w_timestamp(
         &mut self,
         mut dynamic_data: DynamicData,
         timestamp: Time,
@@ -4820,13 +4724,12 @@ impl DataWriterEntity {
             data_value: serialized_key.into(),
         };
         self.transport_writer
-            .add_change(cache_change, message_writer, clock)
-            .await;
+            .add_change(cache_change, message_writer, clock);
 
         Ok(())
     }
 
-    async fn unregister_w_timestamp(
+    fn unregister_w_timestamp(
         &mut self,
         mut dynamic_data: DynamicData,
         timestamp: Time,
@@ -4892,8 +4795,7 @@ impl DataWriterEntity {
             data_value: serialized_key.into(),
         };
         self.transport_writer
-            .add_change(cache_change, message_writer, clock)
-            .await;
+            .add_change(cache_change, message_writer, clock);
         Ok(())
     }
 
@@ -4983,7 +4885,7 @@ impl DataWriterEntity {
             .map(|x| x.last_write_time)
     }
 
-    async fn get_offered_deadline_missed_status(&mut self) -> OfferedDeadlineMissedStatus {
+    fn get_offered_deadline_missed_status(&mut self) -> OfferedDeadlineMissedStatus {
         let status = self.offered_deadline_missed_status.clone();
         self.offered_deadline_missed_status.total_count_change = 0;
         self.status_condition
@@ -5128,12 +5030,11 @@ struct DataReaderEntity {
 
 impl DataReaderEntity {
     #[allow(clippy::too_many_arguments)]
-    const fn new(
+    fn new(
         instance_handle: InstanceHandle,
         qos: DataReaderQos,
         topic_name: String,
         type_support: &'static dyn DynamicType,
-        status_condition: DcpsStatusCondition,
         listener_sender: Option<MpscSender<ListenerMail>>,
         listener_mask: Vec<StatusKind>,
         transport_reader: RtpsReaderKind,
@@ -5152,7 +5053,7 @@ impl DataReaderEntity {
             enabled: false,
             data_available_status_changed_flag: false,
             incompatible_writer_list: Vec::new(),
-            status_condition,
+            status_condition: DcpsStatusCondition::default(),
             listener_sender,
             listener_mask,
             instances: Vec::new(),
@@ -5855,7 +5756,7 @@ impl DataReaderEntity {
             .map(|x| x.last_received_time)
     }
 
-    async fn remove_matched_publication(&mut self, publication_handle: &InstanceHandle) {
+    fn remove_matched_publication(&mut self, publication_handle: &InstanceHandle) {
         let Some(i) = self
             .matched_publication_list
             .iter()
@@ -5868,11 +5769,10 @@ impl DataReaderEntity {
         self.subscription_matched_status.current_count = self.matched_publication_list.len() as i32;
         self.subscription_matched_status.current_count_change -= 1;
         self.status_condition
-            .add_communication_state(StatusKind::SubscriptionMatched)
-            .await;
+            .add_communication_state(StatusKind::SubscriptionMatched);
     }
 
-    async fn read(
+    fn read(
         &mut self,
         max_samples: i32,
         sample_states: &[SampleStateKind],
@@ -5910,7 +5810,7 @@ impl DataReaderEntity {
         Ok(samples)
     }
 
-    async fn take(
+    fn take(
         &mut self,
         max_samples: i32,
         sample_states: Vec<SampleStateKind>,
@@ -5948,7 +5848,7 @@ impl DataReaderEntity {
         Ok(samples)
     }
 
-    async fn take_next_instance(
+    fn take_next_instance(
         &mut self,
         max_samples: i32,
         previous_handle: Option<InstanceHandle>,
@@ -5961,21 +5861,18 @@ impl DataReaderEntity {
         }
 
         match self.next_instance(previous_handle) {
-            Some(next_handle) => {
-                self.take(
-                    max_samples,
-                    sample_states,
-                    view_states,
-                    instance_states,
-                    Some(next_handle),
-                )
-                .await
-            }
+            Some(next_handle) => self.take(
+                max_samples,
+                sample_states,
+                view_states,
+                instance_states,
+                Some(next_handle),
+            ),
             None => Err(DdsError::NoData),
         }
     }
 
-    async fn read_next_instance(
+    fn read_next_instance(
         &mut self,
         max_samples: i32,
         previous_handle: Option<InstanceHandle>,
@@ -5988,16 +5885,13 @@ impl DataReaderEntity {
         }
 
         match self.next_instance(previous_handle) {
-            Some(next_handle) => {
-                self.read(
-                    max_samples,
-                    sample_states,
-                    view_states,
-                    instance_states,
-                    Some(next_handle),
-                )
-                .await
-            }
+            Some(next_handle) => self.read(
+                max_samples,
+                sample_states,
+                view_states,
+                instance_states,
+                Some(next_handle),
+            ),
             None => Err(DdsError::NoData),
         }
     }
