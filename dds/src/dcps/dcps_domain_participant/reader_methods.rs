@@ -18,11 +18,11 @@ use crate::{
         status::{StatusKind, SubscriptionMatchedStatus},
         time::Duration,
     },
-    runtime::DdsRuntime,
+    runtime::{DdsRuntime, Timer},
     xtypes::dynamic_type::DynamicData,
 };
 
-impl<R: DdsRuntime> DcpsDomainParticipant<R> {
+impl DcpsDomainParticipant {
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     #[tracing::instrument(skip(self))]
     pub fn read(
@@ -207,13 +207,13 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
         subscriber_handle: InstanceHandle,
         data_reader_handle: InstanceHandle,
         max_wait: Duration,
+        timer: impl Timer,
     ) -> Pin<Box<dyn Future<Output = DdsResult<()>> + Send>> {
         let participant_handle = self.domain_participant.instance_handle;
-        let timer_handle = self.timer_handle.clone();
         let dcps_sender = self.dcps_sender;
         Box::pin(async move {
             poll_timeout(
-                timer_handle,
+                timer,
                 max_wait.into(),
                 Box::pin(async move {
                     loop {
@@ -304,12 +304,13 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
         Ok(data_reader.get_matched_publications())
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(skip(self, runtime))]
     pub fn set_data_reader_qos(
         &mut self,
         subscriber_handle: InstanceHandle,
         data_reader_handle: InstanceHandle,
         qos: QosKind<DataReaderQos>,
+        runtime: &impl DdsRuntime,
     ) -> DdsResult<()> {
         let Some(subscriber) = self
             .domain_participant
@@ -339,7 +340,7 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
         data_reader.qos = qos;
 
         if data_reader.enabled {
-            self.announce_data_reader(subscriber_handle, data_reader_handle);
+            self.announce_data_reader(subscriber_handle, data_reader_handle, runtime);
         }
         Ok(())
     }
@@ -369,13 +370,14 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
         Ok(data_reader.qos.clone())
     }
 
-    #[tracing::instrument(skip(self, dcps_listener))]
+    #[tracing::instrument(skip(self, dcps_listener, runtime))]
     pub fn set_data_reader_listener(
         &mut self,
         subscriber_handle: InstanceHandle,
         data_reader_handle: InstanceHandle,
         dcps_listener: Option<DcpsDataReaderListener>,
         listener_mask: Vec<StatusKind>,
+        runtime: &impl DdsRuntime,
     ) -> DdsResult<()> {
         let Some(subscriber) = self
             .domain_participant
@@ -392,7 +394,7 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
         else {
             return Err(DdsError::AlreadyDeleted);
         };
-        let listener_sender = dcps_listener.map(|l| l.spawn::<R>(&self.spawner_handle));
+        let listener_sender = dcps_listener.map(|l| l.spawn(&runtime.spawner()));
         data_reader.listener_sender = listener_sender;
         data_reader.listener_mask = listener_mask;
         Ok(())
@@ -440,11 +442,12 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
         }
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(skip(self, runtime))]
     pub fn enable_data_reader(
         &mut self,
         subscriber_handle: InstanceHandle,
         data_reader_handle: InstanceHandle,
+        runtime: &impl DdsRuntime,
     ) -> DdsResult<()> {
         let Some(subscriber) = self
             .domain_participant
@@ -474,7 +477,7 @@ impl<R: DdsRuntime> DcpsDomainParticipant<R> {
                 );
             }
 
-            self.announce_data_reader(subscriber_handle, data_reader_handle);
+            self.announce_data_reader(subscriber_handle, data_reader_handle, runtime);
         }
         Ok(())
     }
