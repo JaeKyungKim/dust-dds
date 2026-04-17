@@ -20,7 +20,7 @@ use crate::{
     infrastructure::{
         domain::DomainId,
         error::DdsResult,
-        instance::InstanceHandle,
+        instance::{InstanceHandle, SampleIdentity, WriteParams},
         qos::{
             DataReaderQos, DataWriterQos, DomainParticipantFactoryQos, DomainParticipantQos,
             PublisherQos, QosKind, SubscriberQos, TopicQos,
@@ -418,13 +418,13 @@ pub enum WriterServiceMail {
         dynamic_data: DynamicData,
         reply_sender: OneshotSender<DdsResult<Option<InstanceHandle>>>,
     },
-    WriteWTimestamp {
+    WriteWParams {
         participant_handle: InstanceHandle,
         publisher_handle: InstanceHandle,
         data_writer_handle: InstanceHandle,
         dynamic_data: DynamicData,
-        timestamp: Time,
-        reply_sender: OneshotSender<DdsResult<()>>,
+        params: WriteParams,
+        reply_sender: OneshotSender<DdsResult<SampleIdentity>>,
     },
     DisposeWTimestamp {
         participant_handle: InstanceHandle,

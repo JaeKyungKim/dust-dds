@@ -583,12 +583,12 @@ impl<R: DdsRuntime> DcpsParticipantFactory<R> {
             }) => reply_sender.send(self.find_participant(participant_handle).and_then(|p| {
                 p.lookup_instance(publisher_handle, data_writer_handle, dynamic_data)
             })),
-            DcpsMail::Writer(WriterServiceMail::WriteWTimestamp {
+            DcpsMail::Writer(WriterServiceMail::WriteWParams {
                 participant_handle,
                 publisher_handle,
                 data_writer_handle,
                 dynamic_data,
-                timestamp,
+                params,
                 reply_sender,
             }) => match self
                 .domain_participant_list
@@ -596,11 +596,11 @@ impl<R: DdsRuntime> DcpsParticipantFactory<R> {
                 .find(|x| x.get_instance_handle() == participant_handle)
                 .ok_or(DdsError::AlreadyDeleted)
             {
-                Ok(p) => p.write_w_timestamp(
+                Ok(p) => p.write_w_params(
                     publisher_handle,
                     data_writer_handle,
                     dynamic_data,
-                    timestamp,
+                    params,
                     &self.runtime,
                     reply_sender,
                 ),

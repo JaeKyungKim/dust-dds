@@ -14,7 +14,7 @@ use crate::{
     },
     infrastructure::{
         error::{DdsError, DdsResult},
-        instance::InstanceHandle,
+        instance::{InstanceHandle, SampleIdentity, WriteParams},
         qos::{DataWriterQos, QosKind},
         qos_policy::{HistoryQosPolicyKind, Length, ReliabilityQosPolicyKind},
         status::{OfferedDeadlineMissedStatus, PublicationMatchedStatus, StatusKind},
@@ -247,16 +247,17 @@ impl DcpsDomainParticipant {
 
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(skip(self, reply_sender, runtime))]
-    pub fn write_w_timestamp(
+    pub fn write_w_params(
         &mut self,
         publisher_handle: InstanceHandle,
         data_writer_handle: InstanceHandle,
         dynamic_data: DynamicData,
-        timestamp: Time,
+        params: WriteParams,
         runtime: &impl DdsRuntime,
-        reply_sender: OneshotSender<DdsResult<()>>,
+        reply_sender: OneshotSender<DdsResult<SampleIdentity>>,
     ) {
         let now = self.get_current_time(runtime);
+        let timestamp = params.timestamp().unwrap_or(now);
         let Some(publisher) = core::iter::once(&mut self.domain_participant.builtin_publisher)
             .chain(&mut self.domain_participant.user_defined_publisher_list)
             .find(|x| x.instance_handle == publisher_handle)
@@ -405,12 +406,12 @@ impl DcpsDomainParticipant {
                                                 Either::A(_) => {
                                                     dcps_sender
                                                         .send(DcpsMail::Writer(
-                                                            WriterServiceMail::WriteWTimestamp {
+                                                            WriterServiceMail::WriteWParams {
                                                                 participant_handle,
                                                                 publisher_handle,
                                                                 data_writer_handle,
                                                                 dynamic_data,
-                                                                timestamp,
+                                                                params,
                                                                 reply_sender,
                                                             },
                                                         ))
@@ -424,12 +425,12 @@ impl DcpsDomainParticipant {
                                             acknowledgment_notification_receiver.await.ok();
                                             dcps_sender
                                                 .send(DcpsMail::Writer(
-                                                    WriterServiceMail::WriteWTimestamp {
+                                                    WriterServiceMail::WriteWParams {
                                                         participant_handle,
                                                         publisher_handle,
                                                         data_writer_handle,
                                                         dynamic_data,
-                                                        timestamp,
+                                                        params,
                                                         reply_sender,
                                                     },
                                                 ))
@@ -451,16 +452,18 @@ impl DcpsDomainParticipant {
         }
 
         data_writer.last_change_sequence_number += 1;
+        let writer_guid = data_writer.transport_writer.guid();
         let change = CacheChange {
             kind: ChangeKind::Alive,
-            writer_guid: data_writer.transport_writer.guid(),
+            writer_guid,
             sequence_number: data_writer.last_change_sequence_number,
             source_timestamp: Some(timestamp.into()),
             instance_handle: Some(instance_handle.into()),
             data_value: serialized_data.into(),
-            related_sample_identity: None,
+            related_sample_identity: params.related_sample_identity(),
         };
         let seq_num = change.sequence_number;
+        let sample_identity = SampleIdentity::new(writer_guid, seq_num);
 
         if seq_num > data_writer.max_seq_num.unwrap_or(0) {
             data_writer.max_seq_num = Some(seq_num)
@@ -523,7 +526,7 @@ impl DcpsDomainParticipant {
         if let DurationKind::Finite(lifespan_duration) = data_writer.qos.lifespan.duration {
             let sleep_duration = timestamp - now + lifespan_duration;
             if sleep_duration <= Duration::new(0, 0) {
-                reply_sender.send(Ok(()));
+                reply_sender.send(Ok(sample_identity));
                 return;
             }
 
@@ -548,7 +551,7 @@ impl DcpsDomainParticipant {
             runtime,
         );
 
-        reply_sender.send(Ok(()));
+        reply_sender.send(Ok(sample_identity));
     }
 
     #[tracing::instrument(skip(self, runtime))]

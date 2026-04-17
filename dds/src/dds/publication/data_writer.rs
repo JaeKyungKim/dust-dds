@@ -4,7 +4,7 @@ use crate::{
     dds_async::data_writer::DataWriterAsync,
     infrastructure::{
         error::DdsResult,
-        instance::InstanceHandle,
+        instance::{InstanceHandle, SampleIdentity, WriteParams},
         qos::{DataWriterQos, QosKind},
         status::{
             LivelinessLostStatus, OfferedDeadlineMissedStatus, OfferedIncompatibleQosStatus,
@@ -210,6 +210,23 @@ where
         timestamp: Time,
     ) -> DdsResult<()> {
         block_on(self.writer_async.write_w_timestamp(data, handle, timestamp))
+    }
+
+    /// Writes a sample with an explicit [`WriteParams`] and returns the
+    /// [`SampleIdentity`] that the DDS middleware associated with it.
+    ///
+    /// Unlike [`DataWriter::write`] and [`DataWriter::write_w_timestamp`],
+    /// this operation exposes the identity under which the sample was
+    /// published. The returned value is required by DDS-RPC clients to
+    /// correlate subsequent replies via the `related_sample_identity`
+    /// inline QoS parameter (RTPS 2.3 §9.6.2.9).
+    ///
+    /// `WriteParams::default()` is equivalent to calling [`DataWriter::write`]
+    /// — no source timestamp override, no RELATED_SAMPLE_IDENTITY inline QoS,
+    /// and the instance is deduced from the data's key.
+    #[tracing::instrument(skip(self, data))]
+    pub fn write_w_params(&self, data: Foo, params: WriteParams) -> DdsResult<SampleIdentity> {
+        block_on(self.writer_async.write_w_params(data, params))
     }
 
     /// This operation requests the middleware to delete the data (the actual deletion is postponed until there is no more use for that

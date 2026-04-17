@@ -41,7 +41,7 @@ use crate::{
     infrastructure::{
         domain::DomainId,
         error::{DdsError, DdsResult},
-        instance::InstanceHandle,
+        instance::{InstanceHandle, WriteParams},
         qos::{
             DataReaderQos, DataWriterQos, DomainParticipantQos, PublisherQos, SubscriberQos,
             TopicQos,
@@ -769,11 +769,11 @@ impl DcpsDomainParticipant {
             );
             let timestamp = self.get_current_time(runtime);
             let (reply_sender, _) = oneshot();
-            self.write_w_timestamp(
+            self.write_w_params(
                 self.domain_participant.builtin_publisher.instance_handle,
                 data_writer_handle,
                 spdp_discovered_participant_data.create_dynamic_sample(),
-                timestamp,
+                WriteParams::default().with_timestamp(timestamp),
                 runtime,
                 reply_sender,
             );
@@ -891,11 +891,11 @@ impl DcpsDomainParticipant {
         );
         let timestamp = self.get_current_time(runtime);
         let (reply_sender, _) = oneshot();
-        self.write_w_timestamp(
+        self.write_w_params(
             self.domain_participant.builtin_publisher.instance_handle,
             data_writer_handle,
             discovered_writer_data.create_dynamic_sample(),
-            timestamp,
+            WriteParams::default().with_timestamp(timestamp),
             runtime,
             reply_sender,
         );
@@ -1025,11 +1025,11 @@ impl DcpsDomainParticipant {
         );
         let timestamp = self.get_current_time(runtime);
         let (reply_sender, _) = oneshot();
-        self.write_w_timestamp(
+        self.write_w_params(
             self.domain_participant.builtin_publisher.instance_handle,
             data_writer_handle,
             discovered_reader_data.create_dynamic_sample(),
-            timestamp,
+            WriteParams::default().with_timestamp(timestamp),
             runtime,
             reply_sender,
         );
@@ -1112,11 +1112,11 @@ impl DcpsDomainParticipant {
         );
         let timestamp = self.get_current_time(runtime);
         let (reply_sender, _) = oneshot();
-        self.write_w_timestamp(
+        self.write_w_params(
             self.domain_participant.builtin_publisher.instance_handle,
             data_writer_handle,
             discovered_topic_data.create_dynamic_sample(),
-            timestamp,
+            WriteParams::default().with_timestamp(timestamp),
             runtime,
             reply_sender,
         );

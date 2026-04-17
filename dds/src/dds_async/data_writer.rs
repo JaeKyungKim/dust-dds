@@ -15,7 +15,7 @@ use crate::{
     },
     infrastructure::{
         error::DdsResult,
-        instance::InstanceHandle,
+        instance::{InstanceHandle, SampleIdentity, WriteParams},
         qos::{DataWriterQos, QosKind},
         status::{
             LivelinessLostStatus, OfferedDeadlineMissedStatus, OfferedIncompatibleQosStatus,
@@ -186,15 +186,33 @@ where
         handle: Option<InstanceHandle>,
         timestamp: Time,
     ) -> DdsResult<()> {
+        self.write_w_params(
+            data,
+            WriteParams::default()
+                .with_timestamp(timestamp)
+                .with_handle_opt(handle),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Async version of
+    /// [`write_w_params`](crate::publication::data_writer::DataWriter::write_w_params).
+    #[tracing::instrument(skip(self, data))]
+    pub async fn write_w_params(
+        &self,
+        data: Foo,
+        params: WriteParams,
+    ) -> DdsResult<SampleIdentity> {
         let (reply_sender, reply_receiver) = oneshot();
         let dynamic_data = data.create_dynamic_sample();
         self.dcps_sender()
-            .send(DcpsMail::Writer(WriterServiceMail::WriteWTimestamp {
+            .send(DcpsMail::Writer(WriterServiceMail::WriteWParams {
                 participant_handle: self.publisher.get_participant().get_instance_handle(),
                 publisher_handle: self.publisher.get_instance_handle(),
                 data_writer_handle: self.handle,
                 dynamic_data,
-                timestamp,
+                params,
                 reply_sender,
             }))
             .await;
