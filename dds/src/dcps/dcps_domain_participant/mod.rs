@@ -107,7 +107,6 @@ use alloc::{
     boxed::Box,
     collections::{BTreeSet, VecDeque},
     string::{String, ToString},
-    sync::Arc,
     vec,
     vec::Vec,
 };
@@ -225,7 +224,6 @@ impl DcpsDomainParticipant {
 
         let mut data_reader_list = Vec::with_capacity(4);
 
-        // Create shared type information Arcs to avoid multiple allocations
         let spdp_participant_type = SpdpDiscoveredParticipantData::TYPE;
         let discovered_topic_type = DiscoveredTopicData::TYPE;
         let discovered_writer_type = DiscoveredWriterData::TYPE;
@@ -615,23 +613,23 @@ impl DcpsDomainParticipant {
 
     fn get_data_reader_async<Foo>(
         &self,
-        subscriber_handle: InstanceHandle,
-        data_reader_handle: InstanceHandle,
+        subscriber_handle: &InstanceHandle,
+        data_reader_handle: &InstanceHandle,
     ) -> DdsResult<DataReaderAsync<Foo>> {
         let data_reader = self
             .domain_participant
             .user_defined_subscriber_list
             .iter()
-            .find(|x| x.instance_handle == subscriber_handle)
+            .find(|x| &x.instance_handle == subscriber_handle)
             .ok_or(DdsError::AlreadyDeleted)?
             .data_reader_list
             .iter()
-            .find(|x| x.instance_handle == data_reader_handle)
+            .find(|x| &x.instance_handle == data_reader_handle)
             .ok_or(DdsError::AlreadyDeleted)?;
 
         Ok(DataReaderAsync::new(
-            data_reader_handle,
-            self.get_subscriber_async(subscriber_handle)?,
+            *data_reader_handle,
+            self.get_subscriber_async(*subscriber_handle)?,
             self.get_topic_description_async(data_reader.topic_name.clone())?,
         ))
     }
@@ -645,23 +643,23 @@ impl DcpsDomainParticipant {
 
     fn get_data_writer_async<Foo>(
         &self,
-        publisher_handle: InstanceHandle,
-        data_writer_handle: InstanceHandle,
+        publisher_handle: &InstanceHandle,
+        data_writer_handle: &InstanceHandle,
     ) -> DdsResult<DataWriterAsync<Foo>> {
         let data_writer = self
             .domain_participant
             .user_defined_publisher_list
             .iter()
-            .find(|x| x.instance_handle == publisher_handle)
+            .find(|x| &x.instance_handle == publisher_handle)
             .ok_or(DdsError::AlreadyDeleted)?
             .data_writer_list
             .iter()
-            .find(|x| x.instance_handle == data_writer_handle)
+            .find(|x| &x.instance_handle == data_writer_handle)
             .ok_or(DdsError::AlreadyDeleted)?;
 
         Ok(DataWriterAsync::new(
-            data_writer_handle,
-            self.get_publisher_async(publisher_handle)?,
+            *data_writer_handle,
+            self.get_publisher_async(*publisher_handle)?,
             self.get_topic_description_async(data_writer.topic_name.clone())?,
         ))
     }
@@ -706,8 +704,8 @@ impl DcpsDomainParticipant {
         }
     }
 
-    pub fn get_instance_handle(&self) -> InstanceHandle {
-        self.domain_participant.instance_handle
+    pub fn get_instance_handle(&self) -> &InstanceHandle {
+        &self.domain_participant.instance_handle
     }
 
     pub fn get_builtin_subscriber_status_condition(&self) -> &DcpsStatusCondition {
@@ -767,12 +765,13 @@ impl DcpsDomainParticipant {
                 )
                 .into(),
             );
-            let timestamp = self.get_current_time(runtime);
+            let timestamp = runtime.clock().now();
+            let publisher_handle = self.domain_participant.builtin_publisher.instance_handle;
             let (reply_sender, _) = oneshot();
             self.write_w_timestamp(
-                self.domain_participant.builtin_publisher.instance_handle,
-                data_writer_handle,
-                spdp_discovered_participant_data.create_dynamic_sample(),
+                &publisher_handle,
+                &data_writer_handle,
+                &spdp_discovered_participant_data.create_dynamic_sample(),
                 timestamp,
                 runtime,
                 reply_sender,
@@ -783,7 +782,7 @@ impl DcpsDomainParticipant {
     #[tracing::instrument(skip(self, runtime))]
     pub fn announce_deleted_participant(&mut self, runtime: &impl DdsRuntime) {
         if self.domain_participant.enabled {
-            let timestamp = self.get_current_time(runtime);
+            let timestamp = runtime.clock().now();
             if let Some(dw) = self
                 .domain_participant
                 .builtin_publisher
@@ -817,22 +816,22 @@ impl DcpsDomainParticipant {
     #[tracing::instrument(skip(self, runtime))]
     fn announce_data_writer(
         &mut self,
-        publisher_handle: InstanceHandle,
-        data_writer_handle: InstanceHandle,
+        publisher_handle: &InstanceHandle,
+        data_writer_handle: &InstanceHandle,
         runtime: &impl DdsRuntime,
     ) {
         let Some(publisher) = self
             .domain_participant
             .user_defined_publisher_list
             .iter()
-            .find(|x| x.instance_handle == publisher_handle)
+            .find(|x| &x.instance_handle == publisher_handle)
         else {
             return;
         };
         let Some(data_writer) = publisher
             .data_writer_list
             .iter()
-            .find(|x| x.instance_handle == data_writer_handle)
+            .find(|x| &x.instance_handle == data_writer_handle)
         else {
             return;
         };
@@ -889,12 +888,13 @@ impl DcpsDomainParticipant {
             )
             .into(),
         );
-        let timestamp = self.get_current_time(runtime);
+        let timestamp = runtime.clock().now();
+        let publisher_handle = self.domain_participant.builtin_publisher.instance_handle;
         let (reply_sender, _) = oneshot();
         self.write_w_timestamp(
-            self.domain_participant.builtin_publisher.instance_handle,
-            data_writer_handle,
-            discovered_writer_data.create_dynamic_sample(),
+            &publisher_handle,
+            &data_writer_handle,
+            &discovered_writer_data.create_dynamic_sample(),
             timestamp,
             runtime,
             reply_sender,
@@ -907,7 +907,7 @@ impl DcpsDomainParticipant {
         data_writer: DataWriterEntity,
         runtime: &impl DdsRuntime,
     ) {
-        let timestamp = self.get_current_time(runtime);
+        let timestamp = runtime.clock().now();
         if let Some(dw) = self
             .domain_participant
             .builtin_publisher
@@ -939,22 +939,22 @@ impl DcpsDomainParticipant {
     #[tracing::instrument(skip(self, runtime))]
     fn announce_data_reader(
         &mut self,
-        subscriber_handle: InstanceHandle,
-        data_reader_handle: InstanceHandle,
+        subscriber_handle: &InstanceHandle,
+        data_reader_handle: &InstanceHandle,
         runtime: &impl DdsRuntime,
     ) {
         let Some(subscriber) = self
             .domain_participant
             .user_defined_subscriber_list
             .iter()
-            .find(|x| x.instance_handle == subscriber_handle)
+            .find(|x| &x.instance_handle == subscriber_handle)
         else {
             return;
         };
         let Some(data_reader) = subscriber
             .data_reader_list
             .iter()
-            .find(|x| x.instance_handle == data_reader_handle)
+            .find(|x| &x.instance_handle == data_reader_handle)
         else {
             return;
         };
@@ -1023,12 +1023,13 @@ impl DcpsDomainParticipant {
             )
             .into(),
         );
-        let timestamp = self.get_current_time(runtime);
+        let timestamp = runtime.clock().now();
+        let publisher_handle = self.domain_participant.builtin_publisher.instance_handle;
         let (reply_sender, _) = oneshot();
         self.write_w_timestamp(
-            self.domain_participant.builtin_publisher.instance_handle,
-            data_writer_handle,
-            discovered_reader_data.create_dynamic_sample(),
+            &publisher_handle,
+            &data_writer_handle,
+            &discovered_reader_data.create_dynamic_sample(),
             timestamp,
             runtime,
             reply_sender,
@@ -1041,7 +1042,7 @@ impl DcpsDomainParticipant {
         data_reader: DataReaderEntity,
         runtime: &impl DdsRuntime,
     ) {
-        let timestamp = self.get_current_time(runtime);
+        let timestamp = runtime.clock().now();
         if let Some(dw) = self
             .domain_participant
             .builtin_publisher
@@ -1110,12 +1111,13 @@ impl DcpsDomainParticipant {
             )
             .into(),
         );
-        let timestamp = self.get_current_time(runtime);
+        let timestamp = runtime.clock().now();
+        let publisher_handle = self.domain_participant.builtin_publisher.instance_handle;
         let (reply_sender, _) = oneshot();
         self.write_w_timestamp(
-            self.domain_participant.builtin_publisher.instance_handle,
-            data_writer_handle,
-            discovered_topic_data.create_dynamic_sample(),
+            &publisher_handle,
+            &data_writer_handle,
+            &discovered_topic_data.create_dynamic_sample(),
             timestamp,
             runtime,
             reply_sender,
@@ -1125,9 +1127,9 @@ impl DcpsDomainParticipant {
     #[tracing::instrument(skip(self))]
     fn add_discovered_reader(
         &mut self,
-        discovered_reader_data: DiscoveredReaderData,
-        publisher_handle: InstanceHandle,
-        data_writer_handle: InstanceHandle,
+        discovered_reader_data: &DiscoveredReaderData,
+        publisher_handle: &InstanceHandle,
+        data_writer_handle: &InstanceHandle,
     ) {
         let default_unicast_locator_list = if let Some(p) = self
             .domain_participant
@@ -1163,7 +1165,7 @@ impl DcpsDomainParticipant {
             .domain_participant
             .user_defined_publisher_list
             .iter_mut()
-            .find(|x| x.instance_handle == publisher_handle)
+            .find(|x| &x.instance_handle == publisher_handle)
         else {
             return;
         };
@@ -1215,7 +1217,7 @@ impl DcpsDomainParticipant {
             let Some(data_writer) = publisher
                 .data_writer_list
                 .iter_mut()
-                .find(|x| x.instance_handle == data_writer_handle)
+                .find(|x| &x.instance_handle == data_writer_handle)
             else {
                 return;
             };
@@ -1244,7 +1246,10 @@ impl DcpsDomainParticipant {
                     {
                         default_unicast_locator_list
                     } else {
-                        discovered_reader_data.reader_proxy.unicast_locator_list
+                        discovered_reader_data
+                            .reader_proxy
+                            .unicast_locator_list
+                            .clone()
                     };
                     let multicast_locator_list = if discovered_reader_data
                         .reader_proxy
@@ -1253,7 +1258,10 @@ impl DcpsDomainParticipant {
                     {
                         default_multicast_locator_list
                     } else {
-                        discovered_reader_data.reader_proxy.multicast_locator_list
+                        discovered_reader_data
+                            .reader_proxy
+                            .multicast_locator_list
+                            .clone()
                     };
                     let reliability_kind = match discovered_reader_data
                         .dds_subscription_data
@@ -1302,14 +1310,14 @@ impl DcpsDomainParticipant {
                             .domain_participant
                             .user_defined_publisher_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == publisher_handle)
+                            .find(|x| &x.instance_handle == publisher_handle)
                         else {
                             return;
                         };
                         let Some(data_writer) = publisher
                             .data_writer_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == data_writer_handle)
+                            .find(|x| &x.instance_handle == data_writer_handle)
                         else {
                             return;
                         };
@@ -1330,14 +1338,14 @@ impl DcpsDomainParticipant {
                             .domain_participant
                             .user_defined_publisher_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == publisher_handle)
+                            .find(|x| &x.instance_handle == publisher_handle)
                         else {
                             return;
                         };
                         let Some(data_writer) = publisher
                             .data_writer_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == data_writer_handle)
+                            .find(|x| &x.instance_handle == data_writer_handle)
                         else {
                             return;
                         };
@@ -1360,14 +1368,14 @@ impl DcpsDomainParticipant {
                             .domain_participant
                             .user_defined_publisher_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == publisher_handle)
+                            .find(|x| &x.instance_handle == publisher_handle)
                         else {
                             return;
                         };
                         let Some(data_writer) = publisher
                             .data_writer_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == data_writer_handle)
+                            .find(|x| &x.instance_handle == data_writer_handle)
                         else {
                             return;
                         };
@@ -1382,14 +1390,14 @@ impl DcpsDomainParticipant {
                         .domain_participant
                         .user_defined_publisher_list
                         .iter_mut()
-                        .find(|x| x.instance_handle == publisher_handle)
+                        .find(|x| &x.instance_handle == publisher_handle)
                     else {
                         return;
                     };
                     let Some(data_writer) = publisher
                         .data_writer_list
                         .iter_mut()
-                        .find(|x| x.instance_handle == data_writer_handle)
+                        .find(|x| &x.instance_handle == data_writer_handle)
                     else {
                         return;
                     };
@@ -1418,14 +1426,14 @@ impl DcpsDomainParticipant {
                             .domain_participant
                             .user_defined_publisher_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == publisher_handle)
+                            .find(|x| &x.instance_handle == publisher_handle)
                         else {
                             return;
                         };
                         let Some(data_writer) = publisher
                             .data_writer_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == data_writer_handle)
+                            .find(|x| &x.instance_handle == data_writer_handle)
                         else {
                             return;
                         };
@@ -1446,14 +1454,14 @@ impl DcpsDomainParticipant {
                             .domain_participant
                             .user_defined_publisher_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == publisher_handle)
+                            .find(|x| &x.instance_handle == publisher_handle)
                         else {
                             return;
                         };
                         let Some(data_writer) = publisher
                             .data_writer_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == data_writer_handle)
+                            .find(|x| &x.instance_handle == data_writer_handle)
                         else {
                             return;
                         };
@@ -1476,14 +1484,14 @@ impl DcpsDomainParticipant {
                             .domain_participant
                             .user_defined_publisher_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == publisher_handle)
+                            .find(|x| &x.instance_handle == publisher_handle)
                         else {
                             return;
                         };
                         let Some(data_writer) = publisher
                             .data_writer_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == data_writer_handle)
+                            .find(|x| &x.instance_handle == data_writer_handle)
                         else {
                             return;
                         };
@@ -1498,14 +1506,14 @@ impl DcpsDomainParticipant {
                         .domain_participant
                         .user_defined_publisher_list
                         .iter_mut()
-                        .find(|x| x.instance_handle == publisher_handle)
+                        .find(|x| &x.instance_handle == publisher_handle)
                     else {
                         return;
                     };
                     let Some(data_writer) = publisher
                         .data_writer_list
                         .iter_mut()
-                        .find(|x| x.instance_handle == data_writer_handle)
+                        .find(|x| &x.instance_handle == data_writer_handle)
                     else {
                         return;
                     };
@@ -1555,9 +1563,9 @@ impl DcpsDomainParticipant {
     #[tracing::instrument(skip(self))]
     fn add_discovered_writer(
         &mut self,
-        discovered_writer_data: DiscoveredWriterData,
-        subscriber_handle: InstanceHandle,
-        data_reader_handle: InstanceHandle,
+        discovered_writer_data: &DiscoveredWriterData,
+        subscriber_handle: &InstanceHandle,
+        data_reader_handle: &InstanceHandle,
     ) {
         let default_unicast_locator_list = if let Some(p) = self
             .domain_participant
@@ -1593,7 +1601,7 @@ impl DcpsDomainParticipant {
             .domain_participant
             .user_defined_subscriber_list
             .iter_mut()
-            .find(|x| x.instance_handle == subscriber_handle)
+            .find(|x| &x.instance_handle == subscriber_handle)
         else {
             return;
         };
@@ -1644,7 +1652,7 @@ impl DcpsDomainParticipant {
             let Some(data_reader) = subscriber
                 .data_reader_list
                 .iter_mut()
-                .find(|x| x.instance_handle == data_reader_handle)
+                .find(|x| &x.instance_handle == data_reader_handle)
             else {
                 return;
             };
@@ -1694,7 +1702,10 @@ impl DcpsDomainParticipant {
                     {
                         default_unicast_locator_list
                     } else {
-                        discovered_writer_data.writer_proxy.unicast_locator_list
+                        discovered_writer_data
+                            .writer_proxy
+                            .unicast_locator_list
+                            .clone()
                     };
                     let multicast_locator_list = if discovered_writer_data
                         .writer_proxy
@@ -1703,7 +1714,10 @@ impl DcpsDomainParticipant {
                     {
                         default_multicast_locator_list
                     } else {
-                        discovered_writer_data.writer_proxy.multicast_locator_list
+                        discovered_writer_data
+                            .writer_proxy
+                            .multicast_locator_list
+                            .clone()
                     };
                     let reliability_kind = match data_reader.qos.reliability.kind {
                         ReliabilityQosPolicyKind::BestEffort => ReliabilityKind::BestEffort,
@@ -1742,14 +1756,14 @@ impl DcpsDomainParticipant {
                             .domain_participant
                             .user_defined_subscriber_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == subscriber_handle)
+                            .find(|x| &x.instance_handle == subscriber_handle)
                         else {
                             return;
                         };
                         let Some(data_reader) = subscriber
                             .data_reader_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == data_reader_handle)
+                            .find(|x| &x.instance_handle == data_reader_handle)
                         else {
                             return;
                         };
@@ -1771,14 +1785,14 @@ impl DcpsDomainParticipant {
                             .domain_participant
                             .user_defined_subscriber_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == subscriber_handle)
+                            .find(|x| &x.instance_handle == subscriber_handle)
                         else {
                             return;
                         };
                         let Some(data_reader) = subscriber
                             .data_reader_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == data_reader_handle)
+                            .find(|x| &x.instance_handle == data_reader_handle)
                         else {
                             return;
                         };
@@ -1801,14 +1815,14 @@ impl DcpsDomainParticipant {
                             .domain_participant
                             .user_defined_subscriber_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == subscriber_handle)
+                            .find(|x| &x.instance_handle == subscriber_handle)
                         else {
                             return;
                         };
                         let Some(data_reader) = subscriber
                             .data_reader_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == data_reader_handle)
+                            .find(|x| &x.instance_handle == data_reader_handle)
                         else {
                             return;
                         };
@@ -1823,14 +1837,14 @@ impl DcpsDomainParticipant {
                         .domain_participant
                         .user_defined_subscriber_list
                         .iter_mut()
-                        .find(|x| x.instance_handle == subscriber_handle)
+                        .find(|x| &x.instance_handle == subscriber_handle)
                     else {
                         return;
                     };
                     let Some(data_reader) = subscriber
                         .data_reader_list
                         .iter_mut()
-                        .find(|x| x.instance_handle == data_reader_handle)
+                        .find(|x| &x.instance_handle == data_reader_handle)
                     else {
                         return;
                     };
@@ -1859,14 +1873,14 @@ impl DcpsDomainParticipant {
                             .domain_participant
                             .user_defined_subscriber_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == subscriber_handle)
+                            .find(|x| &x.instance_handle == subscriber_handle)
                         else {
                             return;
                         };
                         let Some(data_reader) = subscriber
                             .data_reader_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == data_reader_handle)
+                            .find(|x| &x.instance_handle == data_reader_handle)
                         else {
                             return;
                         };
@@ -1887,14 +1901,14 @@ impl DcpsDomainParticipant {
                             .domain_participant
                             .user_defined_subscriber_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == subscriber_handle)
+                            .find(|x| &x.instance_handle == subscriber_handle)
                         else {
                             return;
                         };
                         let Some(data_reader) = subscriber
                             .data_reader_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == data_reader_handle)
+                            .find(|x| &x.instance_handle == data_reader_handle)
                         else {
                             return;
                         };
@@ -1917,14 +1931,14 @@ impl DcpsDomainParticipant {
                             .domain_participant
                             .user_defined_subscriber_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == subscriber_handle)
+                            .find(|x| &x.instance_handle == subscriber_handle)
                         else {
                             return;
                         };
                         let Some(data_reader) = subscriber
                             .data_reader_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == data_reader_handle)
+                            .find(|x| &x.instance_handle == data_reader_handle)
                         else {
                             return;
                         };
@@ -1939,14 +1953,14 @@ impl DcpsDomainParticipant {
                         .domain_participant
                         .user_defined_subscriber_list
                         .iter_mut()
-                        .find(|x| x.instance_handle == subscriber_handle)
+                        .find(|x| &x.instance_handle == subscriber_handle)
                     else {
                         return;
                     };
                     let Some(data_reader) = subscriber
                         .data_reader_list
                         .iter_mut()
-                        .find(|x| x.instance_handle == data_reader_handle)
+                        .find(|x| &x.instance_handle == data_reader_handle)
                     else {
                         return;
                     };
@@ -1989,15 +2003,14 @@ impl DcpsDomainParticipant {
         }
     }
 
-    #[tracing::instrument(skip(self, runtime))]
     fn add_cache_change(
         &mut self,
-        cache_change: CacheChange,
-        subscriber_handle: InstanceHandle,
-        data_reader_handle: InstanceHandle,
+        cache_change: &CacheChange,
+        subscriber_handle: &InstanceHandle,
+        data_reader_handle: &InstanceHandle,
         runtime: &impl DdsRuntime,
     ) {
-        let reader_guid = Guid::from(<[u8; 16]>::from(data_reader_handle));
+        let reader_guid = Guid::from(<[u8; 16]>::from(*data_reader_handle));
         match reader_guid.entity_id() {
             ENTITYID_SPDP_BUILTIN_PARTICIPANT_READER => {
                 self.add_builtin_participants_detector_cache_change(cache_change, runtime)
@@ -2020,10 +2033,9 @@ impl DcpsDomainParticipant {
         }
     }
 
-    #[tracing::instrument(skip(self, runtime))]
     pub fn add_builtin_participants_detector_cache_change(
         &mut self,
-        cache_change: CacheChange,
+        cache_change: &CacheChange,
         runtime: &impl DdsRuntime,
     ) {
         let spdp_type_support =
@@ -2061,12 +2073,12 @@ impl DcpsDomainParticipant {
                     return;
                 };
 
-                self.remove_discovered_participant(discovered_participant_handle);
+                self.remove_discovered_participant(&discovered_participant_handle);
             }
             ChangeKind::AliveFiltered | ChangeKind::NotAliveUnregistered => (), // Do nothing,
         }
 
-        let reception_timestamp = self.get_current_time(runtime);
+        let reception_timestamp = runtime.clock().now();
         if let Some(reader) = self
             .domain_participant
             .builtin_subscriber
@@ -2080,10 +2092,9 @@ impl DcpsDomainParticipant {
         }
     }
 
-    #[tracing::instrument(skip(self, runtime))]
     pub fn add_builtin_publications_detector_cache_change(
         &mut self,
-        cache_change: CacheChange,
+        cache_change: &CacheChange,
         runtime: &impl DdsRuntime,
     ) {
         let sedp_writer_type_support =
@@ -2145,9 +2156,9 @@ impl DcpsDomainParticipant {
                     }
                     for (subscriber_handle, data_reader_handle) in handle_list {
                         self.add_discovered_writer(
-                            discovered_writer_data.clone(),
-                            subscriber_handle,
-                            data_reader_handle,
+                            &discovered_writer_data,
+                            &subscriber_handle,
+                            &data_reader_handle,
                         );
                     }
                 }
@@ -2184,7 +2195,7 @@ impl DcpsDomainParticipant {
             ChangeKind::AliveFiltered | ChangeKind::NotAliveUnregistered => (),
         }
 
-        let reception_timestamp = self.get_current_time(runtime);
+        let reception_timestamp = runtime.clock().now();
         if let Some(reader) = self
             .domain_participant
             .builtin_subscriber
@@ -2198,10 +2209,9 @@ impl DcpsDomainParticipant {
         }
     }
 
-    #[tracing::instrument(skip(self, runtime))]
     pub fn add_builtin_subscriptions_detector_cache_change(
         &mut self,
-        cache_change: CacheChange,
+        cache_change: &CacheChange,
         runtime: &impl DdsRuntime,
     ) {
         let sedp_reader_type_support =
@@ -2293,9 +2303,9 @@ impl DcpsDomainParticipant {
                     }
                     for (publisher_handle, data_writer_handle) in handle_list {
                         self.add_discovered_reader(
-                            discovered_reader_data.clone(),
-                            publisher_handle,
-                            data_writer_handle,
+                            &discovered_reader_data,
+                            &publisher_handle,
+                            &data_writer_handle,
                         );
                     }
                 }
@@ -2333,7 +2343,7 @@ impl DcpsDomainParticipant {
             ChangeKind::AliveFiltered | ChangeKind::NotAliveUnregistered => (),
         }
 
-        let reception_timestamp = self.get_current_time(runtime);
+        let reception_timestamp = runtime.clock().now();
         if let Some(reader) = self
             .domain_participant
             .builtin_subscriber
@@ -2347,10 +2357,9 @@ impl DcpsDomainParticipant {
         }
     }
 
-    #[tracing::instrument(skip(self, runtime))]
     pub fn add_builtin_topics_detector_cache_change(
         &mut self,
-        cache_change: CacheChange,
+        cache_change: &CacheChange,
         runtime: &impl DdsRuntime,
     ) {
         let sedp_topic_type_support =
@@ -2400,7 +2409,7 @@ impl DcpsDomainParticipant {
             | ChangeKind::NotAliveDisposedUnregistered => (),
         }
 
-        let reception_timestamp = self.get_current_time(runtime);
+        let reception_timestamp = runtime.clock().now();
         if let Some(reader) = self
             .domain_participant
             .builtin_subscriber
@@ -2414,20 +2423,19 @@ impl DcpsDomainParticipant {
         }
     }
 
-    #[tracing::instrument(skip(self, runtime))]
     pub fn add_user_defined_cache_change(
         &mut self,
-        cache_change: CacheChange,
-        subscriber_handle: InstanceHandle,
-        data_reader_handle: InstanceHandle,
+        cache_change: &CacheChange,
+        subscriber_handle: &InstanceHandle,
+        data_reader_handle: &InstanceHandle,
         runtime: &impl DdsRuntime,
     ) {
-        let reception_timestamp = self.get_current_time(runtime);
+        let reception_timestamp = runtime.clock().now();
         let Some(subscriber) = self
             .domain_participant
             .user_defined_subscriber_list
             .iter_mut()
-            .find(|x| x.instance_handle == subscriber_handle)
+            .find(|x| &x.instance_handle == subscriber_handle)
         else {
             return;
         };
@@ -2435,7 +2443,7 @@ impl DcpsDomainParticipant {
         let Some(data_reader) = subscriber
             .data_reader_list
             .iter_mut()
-            .find(|x| x.instance_handle == data_reader_handle)
+            .find(|x| &x.instance_handle == data_reader_handle)
         else {
             return;
         };
@@ -2580,6 +2588,8 @@ impl DcpsDomainParticipant {
                         let dcps_sender = self.dcps_sender;
 
                         let mut timer_handle = runtime.timer();
+                        let subscriber_handle = *subscriber_handle;
+                        let data_reader_handle = *data_reader_handle;
                         runtime.spawner().spawn(async move {
                             loop {
                                 timer_handle.delay(deadline_missed_period.into()).await;
@@ -2604,7 +2614,7 @@ impl DcpsDomainParticipant {
                         .domain_participant
                         .user_defined_subscriber_list
                         .iter_mut()
-                        .find(|x| x.instance_handle == subscriber_handle)
+                        .find(|x| &x.instance_handle == subscriber_handle)
                     else {
                         return;
                     };
@@ -2613,7 +2623,7 @@ impl DcpsDomainParticipant {
                         .listener_mask
                         .contains(&StatusKind::DataOnReaders)
                     {
-                        let Ok(the_subscriber) = self.get_subscriber_async(subscriber_handle)
+                        let Ok(the_subscriber) = self.get_subscriber_async(*subscriber_handle)
                         else {
                             return;
                         };
@@ -2621,7 +2631,7 @@ impl DcpsDomainParticipant {
                             .domain_participant
                             .user_defined_subscriber_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == subscriber_handle)
+                            .find(|x| &x.instance_handle == subscriber_handle)
                         else {
                             return;
                         };
@@ -2639,7 +2649,7 @@ impl DcpsDomainParticipant {
                             .domain_participant
                             .user_defined_subscriber_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == subscriber_handle)
+                            .find(|x| &x.instance_handle == subscriber_handle)
                         else {
                             return;
                         };
@@ -2647,7 +2657,7 @@ impl DcpsDomainParticipant {
                         let Some(data_reader) = subscriber
                             .data_reader_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == data_reader_handle)
+                            .find(|x| &x.instance_handle == data_reader_handle)
                         else {
                             return;
                         };
@@ -2661,7 +2671,7 @@ impl DcpsDomainParticipant {
                         .domain_participant
                         .user_defined_subscriber_list
                         .iter_mut()
-                        .find(|x| x.instance_handle == subscriber_handle)
+                        .find(|x| &x.instance_handle == subscriber_handle)
                     else {
                         return;
                     };
@@ -2672,7 +2682,7 @@ impl DcpsDomainParticipant {
                     let Some(data_reader) = subscriber
                         .data_reader_list
                         .iter_mut()
-                        .find(|x| x.instance_handle == data_reader_handle)
+                        .find(|x| &x.instance_handle == data_reader_handle)
                     else {
                         return;
                     };
@@ -2702,7 +2712,7 @@ impl DcpsDomainParticipant {
                             .domain_participant
                             .user_defined_subscriber_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == subscriber_handle)
+                            .find(|x| &x.instance_handle == subscriber_handle)
                         else {
                             return;
                         };
@@ -2710,7 +2720,7 @@ impl DcpsDomainParticipant {
                         let Some(data_reader) = subscriber
                             .data_reader_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == data_reader_handle)
+                            .find(|x| &x.instance_handle == data_reader_handle)
                         else {
                             return;
                         };
@@ -2731,7 +2741,7 @@ impl DcpsDomainParticipant {
                             .domain_participant
                             .user_defined_subscriber_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == subscriber_handle)
+                            .find(|x| &x.instance_handle == subscriber_handle)
                         else {
                             return;
                         };
@@ -2739,7 +2749,7 @@ impl DcpsDomainParticipant {
                         let Some(data_reader) = subscriber
                             .data_reader_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == data_reader_handle)
+                            .find(|x| &x.instance_handle == data_reader_handle)
                         else {
                             return;
                         };
@@ -2762,7 +2772,7 @@ impl DcpsDomainParticipant {
                             .domain_participant
                             .user_defined_subscriber_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == subscriber_handle)
+                            .find(|x| &x.instance_handle == subscriber_handle)
                         else {
                             return;
                         };
@@ -2770,7 +2780,7 @@ impl DcpsDomainParticipant {
                         let Some(data_reader) = subscriber
                             .data_reader_list
                             .iter_mut()
-                            .find(|x| x.instance_handle == data_reader_handle)
+                            .find(|x| &x.instance_handle == data_reader_handle)
                         else {
                             return;
                         };
@@ -2785,7 +2795,7 @@ impl DcpsDomainParticipant {
                         .domain_participant
                         .user_defined_subscriber_list
                         .iter_mut()
-                        .find(|x| x.instance_handle == subscriber_handle)
+                        .find(|x| &x.instance_handle == subscriber_handle)
                     else {
                         return;
                     };
@@ -2793,7 +2803,7 @@ impl DcpsDomainParticipant {
                     let Some(data_reader) = subscriber
                         .data_reader_list
                         .iter_mut()
-                        .find(|x| x.instance_handle == data_reader_handle)
+                        .find(|x| &x.instance_handle == data_reader_handle)
                     else {
                         return;
                     };
@@ -2832,24 +2842,24 @@ impl DcpsDomainParticipant {
     #[tracing::instrument(skip(self, runtime))]
     pub fn offered_deadline_missed(
         &mut self,
-        publisher_handle: InstanceHandle,
-        data_writer_handle: InstanceHandle,
-        change_instance_handle: InstanceHandle,
+        publisher_handle: &InstanceHandle,
+        data_writer_handle: &InstanceHandle,
+        change_instance_handle: &InstanceHandle,
         runtime: &impl DdsRuntime,
     ) {
-        let current_time = self.get_current_time(runtime);
+        let current_time = runtime.clock().now();
         let Some(publisher) = self
             .domain_participant
             .user_defined_publisher_list
             .iter_mut()
-            .find(|x| x.instance_handle == publisher_handle)
+            .find(|x| &x.instance_handle == publisher_handle)
         else {
             return;
         };
         let Some(data_writer) = publisher
             .data_writer_list
             .iter_mut()
-            .find(|x| x.instance_handle == data_writer_handle)
+            .find(|x| &x.instance_handle == data_writer_handle)
         else {
             return;
         };
@@ -2869,7 +2879,7 @@ impl DcpsDomainParticipant {
 
         data_writer
             .offered_deadline_missed_status
-            .last_instance_handle = change_instance_handle;
+            .last_instance_handle = *change_instance_handle;
         data_writer.offered_deadline_missed_status.total_count += 1;
         data_writer
             .offered_deadline_missed_status
@@ -2889,14 +2899,14 @@ impl DcpsDomainParticipant {
                 .domain_participant
                 .user_defined_publisher_list
                 .iter_mut()
-                .find(|x| x.instance_handle == publisher_handle)
+                .find(|x| &x.instance_handle == publisher_handle)
             else {
                 return;
             };
             let Some(data_writer) = publisher
                 .data_writer_list
                 .iter_mut()
-                .find(|x| x.instance_handle == data_writer_handle)
+                .find(|x| &x.instance_handle == data_writer_handle)
             else {
                 return;
             };
@@ -2917,14 +2927,14 @@ impl DcpsDomainParticipant {
                 .domain_participant
                 .user_defined_publisher_list
                 .iter_mut()
-                .find(|x| x.instance_handle == publisher_handle)
+                .find(|x| &x.instance_handle == publisher_handle)
             else {
                 return;
             };
             let Some(data_writer) = publisher
                 .data_writer_list
                 .iter_mut()
-                .find(|x| x.instance_handle == data_writer_handle)
+                .find(|x| &x.instance_handle == data_writer_handle)
             else {
                 return;
             };
@@ -2947,14 +2957,14 @@ impl DcpsDomainParticipant {
                 .domain_participant
                 .user_defined_publisher_list
                 .iter_mut()
-                .find(|x| x.instance_handle == publisher_handle)
+                .find(|x| &x.instance_handle == publisher_handle)
             else {
                 return;
             };
             let Some(data_writer) = publisher
                 .data_writer_list
                 .iter_mut()
-                .find(|x| x.instance_handle == data_writer_handle)
+                .find(|x| &x.instance_handle == data_writer_handle)
             else {
                 return;
             };
@@ -2969,14 +2979,14 @@ impl DcpsDomainParticipant {
             .domain_participant
             .user_defined_publisher_list
             .iter_mut()
-            .find(|x| x.instance_handle == publisher_handle)
+            .find(|x| &x.instance_handle == publisher_handle)
         else {
             return;
         };
         let Some(data_writer) = publisher
             .data_writer_list
             .iter_mut()
-            .find(|x| x.instance_handle == data_writer_handle)
+            .find(|x| &x.instance_handle == data_writer_handle)
         else {
             return;
         };
@@ -2988,30 +2998,30 @@ impl DcpsDomainParticipant {
     #[tracing::instrument(skip(self, runtime))]
     pub fn requested_deadline_missed(
         &mut self,
-        subscriber_handle: InstanceHandle,
-        data_reader_handle: InstanceHandle,
-        change_instance_handle: InstanceHandle,
+        subscriber_handle: &InstanceHandle,
+        data_reader_handle: &InstanceHandle,
+        change_instance_handle: &InstanceHandle,
         runtime: &impl DdsRuntime,
     ) {
-        let current_time = self.get_current_time(runtime);
+        let current_time = runtime.clock().now();
         let Some(subscriber) = self
             .domain_participant
             .user_defined_subscriber_list
             .iter_mut()
-            .find(|x| x.instance_handle == subscriber_handle)
+            .find(|x| &x.instance_handle == subscriber_handle)
         else {
             return;
         };
         let Some(data_reader) = subscriber
             .data_reader_list
             .iter_mut()
-            .find(|x| x.instance_handle == data_reader_handle)
+            .find(|x| &x.instance_handle == data_reader_handle)
         else {
             return;
         };
 
         if let DurationKind::Finite(deadline) = data_reader.qos.deadline.period {
-            if let Some(t) = data_reader.get_instance_received_time(&change_instance_handle) {
+            if let Some(t) = data_reader.get_instance_received_time(change_instance_handle) {
                 if current_time - t < deadline {
                     return;
                 }
@@ -3020,8 +3030,8 @@ impl DcpsDomainParticipant {
             }
         }
 
-        data_reader.remove_instance_ownership(&change_instance_handle);
-        data_reader.increment_requested_deadline_missed_status(change_instance_handle);
+        data_reader.remove_instance_ownership(change_instance_handle);
+        data_reader.increment_requested_deadline_missed_status(*change_instance_handle);
 
         if data_reader
             .listener_mask
@@ -3036,14 +3046,14 @@ impl DcpsDomainParticipant {
                 .domain_participant
                 .user_defined_subscriber_list
                 .iter_mut()
-                .find(|x| x.instance_handle == subscriber_handle)
+                .find(|x| &x.instance_handle == subscriber_handle)
             else {
                 return;
             };
             let Some(data_reader) = subscriber
                 .data_reader_list
                 .iter_mut()
-                .find(|x| x.instance_handle == data_reader_handle)
+                .find(|x| &x.instance_handle == data_reader_handle)
             else {
                 return;
             };
@@ -3064,14 +3074,14 @@ impl DcpsDomainParticipant {
                 .domain_participant
                 .user_defined_subscriber_list
                 .iter_mut()
-                .find(|x| x.instance_handle == subscriber_handle)
+                .find(|x| &x.instance_handle == subscriber_handle)
             else {
                 return;
             };
             let Some(data_reader) = subscriber
                 .data_reader_list
                 .iter_mut()
-                .find(|x| x.instance_handle == data_reader_handle)
+                .find(|x| &x.instance_handle == data_reader_handle)
             else {
                 return;
             };
@@ -3094,14 +3104,14 @@ impl DcpsDomainParticipant {
                 .domain_participant
                 .user_defined_subscriber_list
                 .iter_mut()
-                .find(|x| x.instance_handle == subscriber_handle)
+                .find(|x| &x.instance_handle == subscriber_handle)
             else {
                 return;
             };
             let Some(data_reader) = subscriber
                 .data_reader_list
                 .iter_mut()
-                .find(|x| x.instance_handle == data_reader_handle)
+                .find(|x| &x.instance_handle == data_reader_handle)
             else {
                 return;
             };
@@ -3115,14 +3125,14 @@ impl DcpsDomainParticipant {
             .domain_participant
             .user_defined_subscriber_list
             .iter_mut()
-            .find(|x| x.instance_handle == subscriber_handle)
+            .find(|x| &x.instance_handle == subscriber_handle)
         else {
             return;
         };
         let Some(data_reader) = subscriber
             .data_reader_list
             .iter_mut()
-            .find(|x| x.instance_handle == data_reader_handle)
+            .find(|x| &x.instance_handle == data_reader_handle)
         else {
             return;
         };
@@ -3187,15 +3197,14 @@ impl DcpsDomainParticipant {
     }
 
     /// Remove discovered [domain participant](SpdpDiscoveredParticipantData) with the speficied [handle](InstanceHandle).
-    #[tracing::instrument(skip(self))]
-    fn remove_discovered_participant(&mut self, handle: InstanceHandle) {
+    fn remove_discovered_participant(&mut self, handle: &InstanceHandle) {
         self.domain_participant
             .discovered_participant_list
             .retain(|domain_participant| {
-                domain_participant.dds_participant_data.key.value != handle
+                &domain_participant.dds_participant_data.key.value != handle
             });
 
-        let prefix = Guid::from(<[u8; 16]>::from(handle)).prefix();
+        let prefix = Guid::from(<[u8; 16]>::from(*handle)).prefix();
 
         for subscriber in &mut self.domain_participant.user_defined_subscriber_list {
             for data_reader in &mut subscriber.data_reader_list {
@@ -3649,8 +3658,8 @@ impl DcpsDomainParticipant {
     }
 
     #[tracing::instrument(skip(self, data_message, runtime))]
-    pub fn handle_data(&mut self, data_message: Arc<[u8]>, runtime: &impl DdsRuntime) {
-        if let Ok(rtps_message) = RtpsMessageRead::try_from(data_message.as_ref()) {
+    pub fn handle_data(&mut self, data_message: &[u8], runtime: &impl DdsRuntime) {
+        if let Ok(rtps_message) = RtpsMessageRead::try_from(data_message) {
             let mut message_receiver = MessageReceiver::new(&rtps_message);
 
             while let Some(submessage) = message_receiver.next() {
@@ -3816,9 +3825,9 @@ impl DcpsDomainParticipant {
                                             let subscriber_handle = subscriber.instance_handle;
                                             let reader_handle = dr.instance_handle;
                                             return self.add_cache_change(
-                                                change,
-                                                subscriber_handle,
-                                                reader_handle,
+                                                &change,
+                                                &subscriber_handle,
+                                                &reader_handle,
                                                 runtime,
                                             );
                                         }
@@ -3837,9 +3846,9 @@ impl DcpsDomainParticipant {
                                             let subscriber_handle = subscriber.instance_handle;
                                             let reader_handle = dr.instance_handle;
                                             return self.add_cache_change(
-                                                change,
-                                                subscriber_handle,
-                                                reader_handle,
+                                                &change,
+                                                &subscriber_handle,
+                                                &reader_handle,
                                                 runtime,
                                             );
                                         }
@@ -3862,9 +3871,9 @@ impl DcpsDomainParticipant {
                                 let subscriber_handle = subscriber.instance_handle;
                                 let reader_handle = dr.instance_handle;
                                 return self.add_cache_change(
-                                    change,
-                                    subscriber_handle,
-                                    reader_handle,
+                                    &change,
+                                    &subscriber_handle,
+                                    &reader_handle,
                                     runtime,
                                 );
                             }
@@ -4917,10 +4926,10 @@ impl DataWriterEntity {
         status
     }
 
-    fn get_instance_write_time(&self, instance_handle: InstanceHandle) -> Option<Time> {
+    fn get_instance_write_time(&self, instance_handle: &InstanceHandle) -> Option<Time> {
         self.instance_publication_time
             .iter()
-            .find(|x| x.instance == instance_handle)
+            .find(|x| &x.instance == instance_handle)
             .map(|x| x.last_write_time)
     }
 
@@ -5002,8 +5011,8 @@ impl InstanceState {
         self.view_state = ViewStateKind::NotNew;
     }
 
-    fn handle(&self) -> InstanceHandle {
-        self.handle
+    fn handle(&self) -> &InstanceHandle {
+        &self.handle
     }
 }
 
@@ -5107,7 +5116,7 @@ impl DataReaderEntity {
         sample_states: &[SampleStateKind],
         view_states: &[ViewStateKind],
         instance_states: &[InstanceStateKind],
-        specific_instance_handle: Option<InstanceHandle>,
+        specific_instance_handle: &Option<InstanceHandle>,
     ) -> DdsResult<Vec<IndexedSample>> {
         if let Some(h) = specific_instance_handle {
             if !self.instances.iter().any(|x| x.handle() == h) {
@@ -5120,7 +5129,7 @@ impl DataReaderEntity {
         let mut instances_in_collection = Vec::<InstanceState>::new();
         for (index, cache_change) in self.sample_list.iter().enumerate() {
             if let Some(h) = specific_instance_handle {
-                if cache_change.instance_handle != h {
+                if &cache_change.instance_handle != h {
                     continue;
                 }
             };
@@ -5142,14 +5151,14 @@ impl DataReaderEntity {
 
             if !instances_in_collection
                 .iter()
-                .any(|x| x.handle() == cache_change.instance_handle)
+                .any(|x| x.handle() == &cache_change.instance_handle)
             {
                 instances_in_collection.push(InstanceState::new(cache_change.instance_handle));
             }
 
             let instance_from_collection = instances_in_collection
                 .iter_mut()
-                .find(|x| x.handle() == cache_change.instance_handle)
+                .find(|x| x.handle() == &cache_change.instance_handle)
                 .expect("Instance must exist");
             instance_from_collection.update_state(cache_change.kind);
             let sample_state = cache_change.sample_state;
@@ -5202,7 +5211,7 @@ impl DataReaderEntity {
                     |IndexedSample {
                          sample: (_, sample_info),
                          ..
-                     }| sample_info.instance_handle == handle,
+                     }| &sample_info.instance_handle == handle,
                 )
                 .map(
                     |IndexedSample {
@@ -5219,7 +5228,7 @@ impl DataReaderEntity {
                     |IndexedSample {
                          sample: (_, sample_info),
                          ..
-                     }| sample_info.instance_handle == handle,
+                     }| &sample_info.instance_handle == handle,
                 )
                 .count();
 
@@ -5230,7 +5239,7 @@ impl DataReaderEntity {
                 |IndexedSample {
                      sample: (_, sample_info),
                      ..
-                 }| sample_info.instance_handle == handle,
+                 }| &sample_info.instance_handle == handle,
             ) {
                 sample_info.generation_rank = sample_info.absolute_generation_rank
                     - most_recent_sample_absolute_generation_rank;
@@ -5253,21 +5262,25 @@ impl DataReaderEntity {
         }
     }
 
-    fn next_instance(&mut self, previous_handle: Option<InstanceHandle>) -> Option<InstanceHandle> {
+    fn next_instance(
+        &mut self,
+        previous_handle: &Option<InstanceHandle>,
+    ) -> Option<InstanceHandle> {
         match previous_handle {
             Some(p) => self
                 .instances
                 .iter()
                 .map(|x| x.handle())
                 .filter(|&h| h > p)
-                .min(),
-            None => self.instances.iter().map(|x| x.handle()).min(),
+                .min()
+                .cloned(),
+            None => self.instances.iter().map(|x| x.handle()).min().cloned(),
         }
     }
 
     fn convert_cache_change_to_sample(
         &mut self,
-        cache_change: CacheChange,
+        cache_change: &CacheChange,
         reception_timestamp: Time,
     ) -> DdsResult<ReaderSample> {
         struct KeyHolder<'a> {
@@ -5387,7 +5400,7 @@ impl DataReaderEntity {
                 match self
                     .instances
                     .iter_mut()
-                    .find(|x| x.handle() == instance_handle)
+                    .find(|x| x.handle() == &instance_handle)
                 {
                     Some(x) => x.update_state(cache_change.kind),
                     None => {
@@ -5404,7 +5417,7 @@ impl DataReaderEntity {
                 match self
                     .instances
                     .iter_mut()
-                    .find(|x| x.handle() == instance_handle)
+                    .find(|x| x.handle() == &instance_handle)
                 {
                     Some(instance) => {
                         instance.update_state(cache_change.kind);
@@ -5419,7 +5432,7 @@ impl DataReaderEntity {
         let instance = self
             .instances
             .iter()
-            .find(|x| x.handle() == instance_handle)
+            .find(|x| x.handle() == &instance_handle)
             .expect("Sample with handle must exist");
         Ok(ReaderSample {
             kind: cache_change.kind,
@@ -5436,7 +5449,7 @@ impl DataReaderEntity {
 
     fn add_reader_change(
         &mut self,
-        cache_change: CacheChange,
+        cache_change: &CacheChange,
         reception_timestamp: Time,
     ) -> DdsResult<AddChangeResult> {
         let sample = self.convert_cache_change_to_sample(cache_change, reception_timestamp)?;
@@ -5603,7 +5616,7 @@ impl DataReaderEntity {
                 match self
                     .instances
                     .iter_mut()
-                    .find(|x| x.handle() == sample.instance_handle)
+                    .find(|x| x.handle() == &sample.instance_handle)
                 {
                     Some(x) => x.update_state(sample.kind),
                     None => {
@@ -5620,7 +5633,7 @@ impl DataReaderEntity {
                 match self
                     .instances
                     .iter_mut()
-                    .find(|x| x.handle() == sample.instance_handle)
+                    .find(|x| x.handle() == &sample.instance_handle)
                 {
                     Some(instance) => {
                         instance.update_state(sample.kind);
@@ -5817,7 +5830,7 @@ impl DataReaderEntity {
         sample_states: &[SampleStateKind],
         view_states: &[ViewStateKind],
         instance_states: &[InstanceStateKind],
-        specific_instance_handle: Option<InstanceHandle>,
+        specific_instance_handle: &Option<InstanceHandle>,
     ) -> DdsResult<SampleList> {
         if !self.enabled {
             return Err(DdsError::NotEnabled);
@@ -5852,10 +5865,10 @@ impl DataReaderEntity {
     fn take(
         &mut self,
         max_samples: i32,
-        sample_states: Vec<SampleStateKind>,
-        view_states: Vec<ViewStateKind>,
-        instance_states: Vec<InstanceStateKind>,
-        specific_instance_handle: Option<InstanceHandle>,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+        specific_instance_handle: &Option<InstanceHandle>,
     ) -> DdsResult<SampleList> {
         if !self.enabled {
             return Err(DdsError::NotEnabled);
@@ -5863,9 +5876,9 @@ impl DataReaderEntity {
 
         let indexed_sample_list = self.create_indexed_sample_collection(
             max_samples,
-            &sample_states,
-            &view_states,
-            &instance_states,
+            sample_states,
+            view_states,
+            instance_states,
             specific_instance_handle,
         )?;
 
@@ -5890,10 +5903,10 @@ impl DataReaderEntity {
     fn take_next_instance(
         &mut self,
         max_samples: i32,
-        previous_handle: Option<InstanceHandle>,
-        sample_states: Vec<SampleStateKind>,
-        view_states: Vec<ViewStateKind>,
-        instance_states: Vec<InstanceStateKind>,
+        previous_handle: &Option<InstanceHandle>,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
     ) -> DdsResult<SampleList> {
         if !self.enabled {
             return Err(DdsError::NotEnabled);
@@ -5905,7 +5918,7 @@ impl DataReaderEntity {
                 sample_states,
                 view_states,
                 instance_states,
-                Some(next_handle),
+                &Some(next_handle),
             ),
             None => Err(DdsError::NoData),
         }
@@ -5914,7 +5927,7 @@ impl DataReaderEntity {
     fn read_next_instance(
         &mut self,
         max_samples: i32,
-        previous_handle: Option<InstanceHandle>,
+        previous_handle: &Option<InstanceHandle>,
         sample_states: &[SampleStateKind],
         view_states: &[ViewStateKind],
         instance_states: &[InstanceStateKind],
@@ -5929,7 +5942,7 @@ impl DataReaderEntity {
                 sample_states,
                 view_states,
                 instance_states,
-                Some(next_handle),
+                &Some(next_handle),
             ),
             None => Err(DdsError::NoData),
         }
