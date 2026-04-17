@@ -1,16 +1,15 @@
 use crate::{
-    dcps::channels::mpsc::MpscSender,
+    infrastructure::error::{DdsError, DdsResult},
     std_runtime::{self},
     transport::{
-        interface::{RtpsTransportParticipant, TransportParticipantFactory, WriteMessage},
+        interface::{
+            RtpsTransportParticipant, TransportDataReceiver, TransportParticipantFactory,
+            WriteMessage,
+        },
         types::LOCATOR_KIND_UDP_V6,
     },
 };
-use core::{
-    future::Future,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4},
-    pin::Pin,
-};
+use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
 use dust_dds::transport::types::{LOCATOR_KIND_UDP_V4, Locator};
 use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
 use socket2::Socket;
@@ -80,82 +79,72 @@ fn get_multicast_socket(
     Ok(socket.into())
 }
 
-pub struct RtpsUdpTransportParticipantFactoryBuilder {
-    interface_name: Option<String>,
-    fragment_size: usize,
-    udp_receive_buffer_size: Option<usize>,
-}
-
-impl Default for RtpsUdpTransportParticipantFactoryBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl RtpsUdpTransportParticipantFactoryBuilder {
-    /// Construct a transport factory builder with all the default options.
-    pub fn new() -> Self {
-        Self {
-            interface_name: None,
-            fragment_size: 1344,
-            udp_receive_buffer_size: None,
-        }
-    }
-
-    /// Set the network interface name to use for discovery
-    pub fn interface_name(mut self, interface_name: Option<String>) -> Self {
-        self.interface_name = interface_name;
-        self
-    }
-
-    /// Set the maximum size for the data fragments. Types with serialized data above this size will be transmitted as fragments.
-    pub fn fragment_size(mut self, fragment_size: usize) -> Self {
-        self.fragment_size = fragment_size;
-        self
-    }
-
-    /// Set the value of the SO_RCVBUF option on the UDP socket. [`None`] corresponds to the OS default
-    pub fn udp_receive_buffer_size(mut self, udp_receive_buffer_size: Option<usize>) -> Self {
-        self.udp_receive_buffer_size = udp_receive_buffer_size;
-        self
-    }
-
-    /// Build a new participant factory
-    pub fn build(self) -> Result<RtpsUdpTransportParticipantFactory, String> {
-        let fragment_size_range = 8..=65000;
-        if !fragment_size_range.contains(&self.fragment_size) {
-            Err(format!(
-                "Interface size out of range. Value must be between in {fragment_size_range:?}",
-            ))
-        } else {
-            Ok(RtpsUdpTransportParticipantFactory {
-                interface_name: self.interface_name,
-                fragment_size: self.fragment_size,
-                udp_receive_buffer_size: self.udp_receive_buffer_size,
-            })
-        }
-    }
-}
-
 pub struct RtpsUdpTransportParticipantFactory {
     interface_name: Option<String>,
     fragment_size: usize,
     udp_receive_buffer_size: Option<usize>,
 }
 
+impl RtpsUdpTransportParticipantFactory {
+    /// Set the name of the specific interface to use or None for communicating
+    /// through all available interfaces
+    pub fn set_interface_name(&mut self, interface_name: Option<String>) -> &mut Self {
+        self.interface_name = interface_name;
+        self
+    }
+
+    /// Set the value of the SO_RCVBUF option on the UDP socket. [`None`] corresponds to the OS default
+    pub fn set_udp_receive_buffer_size(
+        &mut self,
+        udp_receive_buffer_size: Option<usize>,
+    ) -> &mut Self {
+        self.udp_receive_buffer_size = udp_receive_buffer_size;
+        self
+    }
+
+    /// Set the fragment size in a range between 8 to 65000. This value is the maximum size of the payload
+    /// transmitted in a single RTPS data submessage. Sizes larger than this value will be transmitted in
+    /// separate message using RTPS data fragments
+    pub fn set_fragment_size(&mut self, fragment_size: usize) -> DdsResult<&mut Self> {
+        let fragment_size_range = 8..=65000;
+        if !fragment_size_range.contains(&self.fragment_size) {
+            return Err(DdsError::BadParameter);
+        }
+        self.fragment_size = fragment_size;
+        Ok(self)
+    }
+
+    /// Get the value of the currently configured interface name
+    pub fn interface_name(&self) -> Option<&String> {
+        self.interface_name.as_ref()
+    }
+
+    /// Get the value of the currently configured fragment size
+    pub fn fragment_size(&self) -> usize {
+        self.fragment_size
+    }
+
+    /// Get the value of the currently configured buffer size
+    pub fn udp_receive_buffer_size(&self) -> Option<usize> {
+        self.udp_receive_buffer_size
+    }
+}
+
 impl Default for RtpsUdpTransportParticipantFactory {
     fn default() -> Self {
-        RtpsUdpTransportParticipantFactoryBuilder::new()
-            .build()
-            .expect("Default configuration should work")
+        Self {
+            interface_name: None,
+            fragment_size: 1344,
+            udp_receive_buffer_size: None,
+        }
     }
 }
 
 impl TransportParticipantFactory for RtpsUdpTransportParticipantFactory {
-    async fn create_participant(
+    fn create_participant(
         &self,
         domain_id: i32,
-        data_channel_sender: MpscSender<Arc<[u8]>>,
+        data_channel_sender: TransportDataReceiver,
     ) -> RtpsTransportParticipant {
         let interface_address_list = NetworkInterface::show()
             .expect("Could not scan interfaces")
@@ -244,9 +233,8 @@ impl TransportParticipantFactory for RtpsUdpTransportParticipantFactory {
                     if let Ok(size) = metatraffic_multicast_socket.recv(&mut buf) {
                         if size > 0 {
                             std_runtime::executor::block_on(
-                                data_channel_sender_clone.send(Arc::from(&buf[..size])),
-                            )
-                            .expect("chanel_message sender alive");
+                                data_channel_sender_clone.receive_message(buf[..size].to_vec()),
+                            );
                         }
                     }
                 }
@@ -262,9 +250,8 @@ impl TransportParticipantFactory for RtpsUdpTransportParticipantFactory {
                     if let Ok(size) = metatraffic_unicast_socket.recv(&mut buf) {
                         if size > 0 {
                             std_runtime::executor::block_on(
-                                data_channel_sender_clone.send(Arc::from(&buf[..size])),
+                                data_channel_sender_clone.receive_message(buf[..size].to_vec()),
                             )
-                            .expect("chanel_message sender alive")
                         }
                     }
                 }
@@ -280,9 +267,8 @@ impl TransportParticipantFactory for RtpsUdpTransportParticipantFactory {
                     if let Ok(size) = default_unicast_socket.recv(&mut buf) {
                         if size > 0 {
                             std_runtime::executor::block_on(
-                                data_channel_sender_clone.send(Arc::from(&buf[..size])),
+                                data_channel_sender_clone.receive_message(buf[..size].to_vec()),
                             )
-                            .expect("chanel_message sender alive");
                         }
                     }
                 }
@@ -384,11 +370,7 @@ impl MessageWriter {
     }
 }
 impl WriteMessage for MessageWriter {
-    fn write_message(
-        &self,
-        datagram: &[u8],
-        locator_list: &[Locator],
-    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    fn write_message(&self, datagram: &[u8], locator_list: &[Locator]) {
         for &destination_locator in locator_list {
             if UdpLocator(destination_locator).is_multicast() {
                 let socket2: socket2::Socket = self.socket.try_clone().unwrap().into();
@@ -416,6 +398,5 @@ impl WriteMessage for MessageWriter {
                     .ok();
             }
         }
-        Box::pin(async {})
     }
 }

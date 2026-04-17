@@ -12,7 +12,7 @@ use crate::{
     std_runtime::executor::block_on,
     xtypes::dynamic_type::DynamicType,
 };
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::{string::String, vec::Vec};
 
 /// The [`Topic`] represents the fact that both publications and subscriptions are tied to a single data-type. Its attributes
 /// `type_name` defines a unique resulting type for the publication or the subscription. It has also a `name` that allows it to
@@ -142,7 +142,7 @@ impl Topic {
     /// This operation returns the [`InstanceHandle`] that represents the Entity.
     #[tracing::instrument(skip(self))]
     pub fn get_instance_handle(&self) -> InstanceHandle {
-        block_on(self.topic_async.get_instance_handle())
+        self.topic_async.get_instance_handle()
     }
 
     /// This operation installs a Listener on the Entity. The listener will only be invoked on the changes of communication status
@@ -164,7 +164,7 @@ impl Topic {
 impl Topic {
     #[doc(hidden)]
     #[tracing::instrument(skip(self))]
-    pub fn get_type_support(&self) -> DdsResult<Arc<DynamicType>> {
+    pub fn get_type_support(&self) -> DdsResult<&'static dyn DynamicType> {
         block_on(self.topic_async.get_type_support())
     }
 }

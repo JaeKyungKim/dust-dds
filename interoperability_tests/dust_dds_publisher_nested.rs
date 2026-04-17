@@ -4,6 +4,7 @@ use self::interoperability::test::{Inner, Nested};
 use dust_dds::{
     domain::domain_participant_factory::DomainParticipantFactory,
     infrastructure::{
+        listener::NO_LISTENER,
         qos::{DataWriterQos, QosKind},
         qos_policy::{
             DurabilityQosPolicy, DurabilityQosPolicyKind, ReliabilityQosPolicy,
@@ -13,7 +14,6 @@ use dust_dds::{
         time::{Duration, DurationKind},
         type_support::TypeSupport,
     },
-    listener::NO_LISTENER,
     wait_set::{Condition, WaitSet},
 };
 
@@ -28,7 +28,7 @@ fn main() {
     let topic = participant
         .create_topic::<Nested>(
             "Nested",
-            Nested::get_type_name(),
+            Nested::TYPE_NAME,
             QosKind::Default,
             NO_LISTENER,
             NO_STATUS,

@@ -20,7 +20,11 @@ use core::cmp::max;
 fn total_fragments_expected(data_frag_submessage: &DataFragSubmessage) -> u32 {
     let data_size = data_frag_submessage.data_size();
     let fragment_size = data_frag_submessage.fragment_size() as u32;
-    let total_fragments_correction = if data_size % fragment_size == 0 { 0 } else { 1 };
+    let total_fragments_correction = if data_size.is_multiple_of(fragment_size) {
+        0
+    } else {
+        1
+    };
     data_size / fragment_size + total_fragments_correction
 }
 
@@ -252,7 +256,7 @@ impl RtpsWriterProxy {
         self.acknack_count = self.acknack_count.wrapping_add(1);
     }
 
-    pub async fn write_message(
+    pub fn write_message(
         &mut self,
         reader_guid: &Guid,
         message_writer: &(impl WriteMessage + ?Sized),
@@ -329,9 +333,7 @@ impl RtpsWriterProxy {
                 )
             };
 
-            message_writer
-                .write_message(rtps_message.buffer(), self.unicast_locator_list())
-                .await;
+            message_writer.write_message(rtps_message.buffer(), self.unicast_locator_list());
         }
     }
 

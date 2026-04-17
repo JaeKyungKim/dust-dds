@@ -4,6 +4,7 @@ use self::interoperability::test::BigDataType;
 use dust_dds::{
     domain::domain_participant_factory::DomainParticipantFactory,
     infrastructure::{
+        listener::NO_LISTENER,
         qos::{DataReaderQos, QosKind},
         qos_policy::{
             DurabilityQosPolicy, DurabilityQosPolicyKind, ReliabilityQosPolicy,
@@ -14,7 +15,6 @@ use dust_dds::{
         time::{Duration, DurationKind},
         type_support::TypeSupport,
     },
-    listener::NO_LISTENER,
     wait_set::{Condition, WaitSet},
 };
 
@@ -29,7 +29,7 @@ fn main() {
     let topic = participant
         .create_topic::<BigDataType>(
             "BigData",
-            BigDataType::get_type_name(),
+            BigDataType::TYPE_NAME,
             QosKind::Default,
             NO_LISTENER,
             NO_STATUS,

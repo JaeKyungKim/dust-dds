@@ -4,10 +4,9 @@ use super::{
 };
 use crate::{
     dcps::{
-        actor::ActorAddress,
         channels::oneshot::oneshot,
-        domain_participant_mail::{DcpsDomainParticipantMail, TopicServiceMail},
-        status_condition::DcpsStatusCondition,
+        dcps_mail::{DcpsMail, TopicServiceMail},
+        status_condition::StatusConditionEntity,
     },
     infrastructure::{
         error::DdsResult,
@@ -17,12 +16,11 @@ use crate::{
     },
     xtypes::dynamic_type::DynamicType,
 };
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::{string::String, vec::Vec};
 
 /// Async version of [`Topic`](crate::topic_definition::topic::Topic).
 pub struct TopicAsync {
     handle: InstanceHandle,
-    status_condition_address: ActorAddress<DcpsStatusCondition>,
     type_name: String,
     topic_name: String,
     participant: DomainParticipantAsync,
@@ -32,7 +30,6 @@ impl Clone for TopicAsync {
     fn clone(&self) -> Self {
         Self {
             handle: self.handle,
-            status_condition_address: self.status_condition_address.clone(),
             type_name: self.type_name.clone(),
             topic_name: self.topic_name.clone(),
             participant: self.participant.clone(),
@@ -43,14 +40,12 @@ impl Clone for TopicAsync {
 impl TopicAsync {
     pub(crate) fn new(
         handle: InstanceHandle,
-        status_condition_address: ActorAddress<DcpsStatusCondition>,
         type_name: String,
         topic_name: String,
         participant: DomainParticipantAsync,
     ) -> Self {
         Self {
             handle,
-            status_condition_address,
             type_name,
             topic_name,
             participant,
@@ -64,14 +59,15 @@ impl TopicAsync {
     pub async fn get_inconsistent_topic_status(&self) -> DdsResult<InconsistentTopicStatus> {
         let (reply_sender, reply_receiver) = oneshot();
         self.participant
-            .participant_address()
-            .send(DcpsDomainParticipantMail::Topic(
+            .dcps_sender()
+            .send(DcpsMail::Topic(
                 TopicServiceMail::GetInconsistentTopicStatus {
+                    participant_handle: self.participant.get_instance_handle(),
                     topic_name: self.topic_name.clone(),
                     reply_sender,
                 },
             ))
-            .await?;
+            .await;
         reply_receiver.await?
     }
 }
@@ -102,13 +98,14 @@ impl TopicAsync {
     pub async fn set_qos(&self, qos: QosKind<TopicQos>) -> DdsResult<()> {
         let (reply_sender, reply_receiver) = oneshot();
         self.participant
-            .participant_address()
-            .send(DcpsDomainParticipantMail::Topic(TopicServiceMail::SetQos {
+            .dcps_sender()
+            .send(DcpsMail::Topic(TopicServiceMail::SetQos {
+                participant_handle: self.participant.get_instance_handle(),
                 topic_name: self.topic_name.clone(),
                 topic_qos: qos,
                 reply_sender,
             }))
-            .await?;
+            .await;
 
         reply_receiver.await?
     }
@@ -118,12 +115,13 @@ impl TopicAsync {
     pub async fn get_qos(&self) -> DdsResult<TopicQos> {
         let (reply_sender, reply_receiver) = oneshot();
         self.participant
-            .participant_address()
-            .send(DcpsDomainParticipantMail::Topic(TopicServiceMail::GetQos {
+            .dcps_sender()
+            .send(DcpsMail::Topic(TopicServiceMail::GetQos {
+                participant_handle: self.participant.get_instance_handle(),
                 topic_name: self.topic_name.clone(),
                 reply_sender,
             }))
-            .await?;
+            .await;
 
         reply_receiver.await?
     }
@@ -131,7 +129,13 @@ impl TopicAsync {
     /// Async version of [`get_statuscondition`](crate::topic_definition::topic::Topic::get_statuscondition).
     #[tracing::instrument(skip(self))]
     pub fn get_statuscondition(&self) -> StatusConditionAsync {
-        StatusConditionAsync::new(self.status_condition_address.clone())
+        StatusConditionAsync::new(
+            *self.participant.dcps_sender(),
+            StatusConditionEntity::Topic {
+                participant_handle: self.get_participant().get_instance_handle(),
+                topic_handle: self.handle,
+            },
+        )
     }
 
     /// Async version of [`get_status_changes`](crate::topic_definition::topic::Topic::get_status_changes).
@@ -145,19 +149,19 @@ impl TopicAsync {
     pub async fn enable(&self) -> DdsResult<()> {
         let (reply_sender, reply_receiver) = oneshot();
         self.participant
-            .participant_address()
-            .send(DcpsDomainParticipantMail::Topic(TopicServiceMail::Enable {
+            .dcps_sender()
+            .send(DcpsMail::Topic(TopicServiceMail::Enable {
+                participant_handle: self.participant.get_instance_handle(),
                 topic_name: self.topic_name.clone(),
-                participant_address: self.participant.participant_address().clone(),
                 reply_sender,
             }))
-            .await?;
+            .await;
         reply_receiver.await?
     }
 
     /// Async version of [`get_instance_handle`](crate::topic_definition::topic::Topic::get_instance_handle).
     #[tracing::instrument(skip(self))]
-    pub async fn get_instance_handle(&self) -> InstanceHandle {
+    pub fn get_instance_handle(&self) -> InstanceHandle {
         self.handle
     }
 
@@ -175,17 +179,16 @@ impl TopicAsync {
 impl TopicAsync {
     #[doc(hidden)]
     #[tracing::instrument(skip(self))]
-    pub async fn get_type_support(&self) -> DdsResult<Arc<DynamicType>> {
+    pub async fn get_type_support(&self) -> DdsResult<&'static dyn DynamicType> {
         let (reply_sender, reply_receiver) = oneshot();
         self.participant
-            .participant_address()
-            .send(DcpsDomainParticipantMail::Topic(
-                TopicServiceMail::GetTypeSupport {
-                    topic_name: self.topic_name.clone(),
-                    reply_sender,
-                },
-            ))
-            .await?;
+            .dcps_sender()
+            .send(DcpsMail::Topic(TopicServiceMail::GetTypeSupport {
+                participant_handle: self.participant.get_instance_handle(),
+                topic_name: self.topic_name.clone(),
+                reply_sender,
+            }))
+            .await;
 
         reply_receiver.await?
     }

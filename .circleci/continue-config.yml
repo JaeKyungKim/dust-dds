@@ -53,12 +53,12 @@ jobs:
       - setup_remote_docker
       - run:
           name: Build Docker image
-          command: docker build --file .circleci/Dockerfile --tag s2esystems/dust_dds_interoperability:1.85.0 .
+          command: docker build --file .circleci/Dockerfile --tag s2esystems/dust_dds_interoperability:1.87.0 .
       - run:
           name: Push image to DockerHub
           command: |
             echo $DOCKERHUB_ACCESS_TOKEN | docker login --username $DOCKERHUB_USERNAME --password-stdin
-            docker push s2esystems/dust_dds_interoperability:1.85.0
+            docker push s2esystems/dust_dds_interoperability:1.87.0
 
   code_checks:
     docker:
@@ -71,7 +71,7 @@ jobs:
       - run: cargo --version
       - run: cargo clippy --all-features --all-targets --all
       - run: cargo fmt --check --all
-  benchmark:
+  performance_benchmark:
     docker:
       - image: cimg/rust:1.87.0
     resource_class: large
@@ -84,6 +84,27 @@ jobs:
       # Performance regression is not explicitly checked due to measurement instability issues
       - store_artifacts:
           path: ./target/criterion
+  memory_benchmark:
+    docker:
+      - image: cimg/rust:1.87.0
+    resource_class: large
+    steps:
+      - checkout
+      - run:
+          name: Install Valgrind and jq
+          command: sudo apt-get update && sudo apt-get install -y valgrind jq
+      - run:
+          name: Measure heap usage
+          command: |
+            TEST_BIN=$(cargo test --package dust_dds --test write_read_samples read_only_unread_samples --no-run --message-format=json -- --exact | jq -r 'select(.profile.test == true) | .executable' | grep -v null)
+            valgrind --tool=massif --massif-out-file=massif.out $TEST_BIN read_only_unread_samples -- --exact
+      - store_artifacts:
+          path: massif.out
+      - run:
+          name: Convert heap usage data to text
+          command: ms_print massif.out > massif_report.txt
+      - store_artifacts:
+          path: massif_report.txt
   tests:
     docker:
       - image: cimg/rust:1.87.0
@@ -134,19 +155,52 @@ jobs:
 
       - store_artifacts:
           path: /tmp/coverage
-  compilation_times:
+  build_metrics:
     docker:
       - image: cimg/rust:1.87.0
     resource_class: large
     steps:
       - checkout
-      - run: cargo build --package dust_dds --timings --tests --examples
+      - restore_cache:
+          keys:
+            - cargo-bloat-bin-v1-{{ arch }}
+      - run:
+          name: Install cargo-bloat
+          command: |
+            if ! command -v cargo-bloat &> /dev/null; then
+              cargo install cargo-bloat
+            fi
+      - save_cache:
+          key: cargo-bloat-bin-v1-{{ arch }}
+          paths:
+            - ~/.cargo/bin/cargo-bloat
+      - run: 
+          name: Check compilation time
+          command: cargo build --package dust_dds --timings --tests --examples      
+      - run:
+          name: Check binary size hello_world_publisher
+          command: cargo bloat -p dust_dds --example hello_world_publisher --release --wide -n 100 --filter dust_dds > hello_world_publisher_bloat.txt
+      - store_artifacts:
+          path: hello_world_publisher_bloat.txt
+      - run:
+          name: Check binary size hello_world_subscriber
+          command: cargo bloat -p dust_dds --example hello_world_subscriber --release --wide -n 100 --filter dust_dds > hello_world_subscriber_bloat.txt
+      - store_artifacts:
+          path: hello_world_subscriber_bloat.txt
+      - run:
+          name: Install nightly toolchain
+          command: rustup toolchain install nightly
+      - run:
+          name: Print type sizes
+          command: cargo +nightly rustc --package dust_dds --release -- -Zprint-type-sizes > type_sizes.txt
       - store_artifacts:
           path: ./target/cargo-timings
+      - store_artifacts:
+          path: type_sizes.txt
 
   interoperability_tests:
     docker:
-      - image: s2esystems/dust_dds_interoperability:1.85.0
+      - image: s2esystems/dust_dds_interoperability:1.87.0
     steps:
       - checkout
       - run:
@@ -165,6 +219,7 @@ jobs:
       - run:
           name: Build dust binaries
           command: |
+            cargo update --package dust_dds_interoperability
             cargo build --package dust_dds_interoperability
       - run:
           name: FastDDS publisher interoperability test
@@ -293,8 +348,9 @@ workflows:
       - tests
       - hello_world_on_macos
       - hello_world_on_windows
-      - benchmark
-      - compilation_times
+      - performance_benchmark
+      - memory_benchmark
+      - build_metrics
       - code_checks
       - multi_machine_tests
       - shapes_demo_build

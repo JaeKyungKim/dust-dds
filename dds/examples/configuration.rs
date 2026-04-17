@@ -1,8 +1,9 @@
 use dust_dds::{
     configuration::DustDdsConfigurationBuilder,
     domain::domain_participant_factory::DomainParticipantFactory,
-    infrastructure::{qos::QosKind, status::NO_STATUS, type_support::DdsType},
-    listener::NO_LISTENER,
+    infrastructure::{
+        listener::NO_LISTENER, qos::QosKind, status::NO_STATUS, type_support::DdsType,
+    },
 };
 
 #[derive(DdsType, Debug)]
@@ -20,9 +21,7 @@ fn main() {
         .build()
         .unwrap();
 
-    participant_factory
-        .set_configuration(configuration)
-        .unwrap();
+    *participant_factory.get_mut_configuration() = configuration;
 
     let participant = participant_factory
         .create_participant(domain_id, QosKind::Default, NO_LISTENER, NO_STATUS)

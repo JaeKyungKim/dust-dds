@@ -26,23 +26,21 @@ pub fn expand_type_support(input: &DeriveInput) -> Result<TokenStream> {
     let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
     let (get_type_quote, create_dynamic_sample_quote, create_sample_quote) = match &input.data {
         syn::Data::Struct(data_struct) => {
-            let struct_builder = quote! {
-                extern crate alloc;
-                let mut builder = dust_dds::xtypes::dynamic_type::DynamicTypeBuilderFactory::create_type(
-                    dust_dds::xtypes::dynamic_type::TypeDescriptor {
-                        kind: dust_dds::xtypes::dynamic_type::TypeKind::STRUCTURE,
-                        name: alloc::string::String::from(#type_name),
-                        base_type: None,
-                        discriminator_type: None,
-                        bound: alloc::vec::Vec::new(),
-                        element_type: None,
-                        key_element_type: None,
-                        extensibility_kind: #extensibility_kind,
-                        is_nested: #is_nested,
-                    });
+            let struct_descriptor = quote! {
+                &dust_dds::xtypes::dynamic_type::TypeDescriptor {
+                    kind: dust_dds::xtypes::dynamic_type::TypeKind::STRUCTURE,
+                    name: #type_name,
+                    base_type: None,
+                    discriminator_type: None,
+                    bound: None,
+                    element_type: None,
+                    key_element_type: None,
+                    extensibility_kind: #extensibility_kind,
+                    is_nested: #is_nested,
+                }
             };
 
-            let mut member_builder_seq = quote! {};
+            let mut member_list = Vec::new();
             let mut member_sample_seq = Vec::new();
             let mut member_dynamic_sample_seq = Vec::new();
 
@@ -68,50 +66,74 @@ pub fn expand_type_support(input: &DeriveInput) -> Result<TokenStream> {
                 let member_type = &field.ty;
                 let is_key = field_attributes.key;
                 let is_optional = field_attributes.optional;
-                let default_value = match field_attributes.default_value {
-                    Some(expr) => {
-                        quote! {Some(dust_dds::xtypes::data_storage::DataStorageMapping::into_storage(#expr))}
-                    }
-                    None if is_optional => {
-                        quote! {Some(dust_dds::xtypes::data_storage::DataStorageMapping::into_storage(<#member_type as Default>::default()))}
-                    }
-                    _ => quote! {None},
-                };
-                member_builder_seq.extend(
+                let default_value = field_attributes
+                    .default_value
+                    .map(|x| quote! {#x})
+                    .unwrap_or(quote! {Default::default()});
+
+                member_list.push(
                     quote! {
-                         builder.add_member(dust_dds::xtypes::dynamic_type::MemberDescriptor {
-                            name: alloc::string::String::from(#field_name),
-                            id: #member_id,
-                            r#type: <#member_type as dust_dds::xtypes::binding::XTypesBinding>::get_dynamic_type(),
-                            default_value: #default_value,
-                            index: #index,
-                            try_construct_kind: dust_dds::xtypes::dynamic_type::TryConstructKind::UseDefault,
-                            label: alloc::vec::Vec::new(),
-                            is_key: #is_key,
-                            is_optional: #is_optional,
-                            is_must_understand: true,
-                            is_shared: false,
-                            is_default_label: false,
-                        })
-                        .unwrap();
-                    },
+                         dust_dds::xtypes::dynamic_type::DynamicTypeMember {
+                            descriptor: dust_dds::xtypes::dynamic_type::MemberDescriptor {
+                                name: #field_name,
+                                id: #member_id,
+                                r#type: <#member_type as dust_dds::xtypes::binding::XTypesBinding>::TYPE_INFORMATION,
+                                default_value: None,
+                                index: #index,
+                                try_construct_kind: dust_dds::xtypes::dynamic_type::TryConstructKind::UseDefault,
+                                label: None,
+                                is_key: #is_key,
+                                is_optional: #is_optional,
+                                is_must_understand: true,
+                                is_shared: false,
+                                is_default_label: false,
+                            }
+                        }
+                    }
                 );
 
                 if !field_attributes.non_serialized {
                     match &field.ident {
                         Some(field_ident) => {
-                            member_sample_seq.push(quote! {
-                                #field_ident: dust_dds::xtypes::data_storage::DataStorageMapping::try_from_storage(src.remove_value(#member_id).expect("Must exist")).expect("Must match"),
-                            });
-                            member_dynamic_sample_seq
-                                .push(quote! {data.set_value(#member_id, dust_dds::xtypes::data_storage::DataStorageMapping::into_storage(self.#field_ident));});
+                            if is_optional {
+                                member_sample_seq.push(quote! {
+                                    #field_ident: src.remove_value(#member_id).map_or(#default_value, |x| {
+                                        dust_dds::xtypes::data_storage::DataStorageMapping::try_from_storage(x).expect("Must match")
+                                    }),
+                                });
+                                member_dynamic_sample_seq
+                                    .push(quote! {
+                                        if self.#field_ident != #default_value {
+                                            data.set_value(#member_id, dust_dds::xtypes::data_storage::DataStorageMapping::into_storage(self.#field_ident));
+                                        }
+                                    });
+                            } else {
+                                member_sample_seq.push(quote! {
+                                    #field_ident: dust_dds::xtypes::data_storage::DataStorageMapping::try_from_storage(src.remove_value(#member_id).expect("Must exist")).expect("Must match"),
+                                });
+                                member_dynamic_sample_seq
+                                    .push(quote! {data.set_value(#member_id, dust_dds::xtypes::data_storage::DataStorageMapping::into_storage(self.#field_ident));});
+                            }
                         }
                         None => {
                             let index = Index::from(field_index);
-                            member_sample_seq.push(quote! { dust_dds::xtypes::data_storage::DataStorageMapping::try_from_storage(src.remove_value(#member_id).expect("Must exist")).expect("Must match"),});
-                            member_dynamic_sample_seq.push(quote! {
-                                data.set_value(#member_id, dust_dds::xtypes::data_storage::DataStorageMapping::into_storage(self.#index));
-                            })
+                            if is_optional {
+                                member_sample_seq.push(quote! {
+                                    src.remove_value(#member_id).map_or(#default_value, |x| {
+                                        DataStorageMapping::try_from_storage(x).expect("Must match")
+                                    }),
+                                });
+                                member_dynamic_sample_seq.push(quote! {
+                                    if self.#index != #default_value {
+                                        data.set_value(#member_id, dust_dds::xtypes::data_storage::DataStorageMapping::into_storage(self.#index));
+                                    }
+                                })
+                            } else {
+                                member_sample_seq.push(quote! { dust_dds::xtypes::data_storage::DataStorageMapping::try_from_storage(src.remove_value(#member_id).expect("Must exist")).expect("Must match"),});
+                                member_dynamic_sample_seq.push(quote! {
+                                    data.set_value(#member_id, dust_dds::xtypes::data_storage::DataStorageMapping::into_storage(self.#index));
+                                })
+                            }
                         }
                     }
                 }
@@ -125,13 +147,15 @@ pub fn expand_type_support(input: &DeriveInput) -> Result<TokenStream> {
                 .is_none();
 
             let get_type_quote = quote! {
-                #struct_builder
-                #member_builder_seq
-                builder.build()
+                const r#TYPE: &'static dyn dust_dds::xtypes::dynamic_type::DynamicType =
+                    &dust_dds::xtypes::dynamic_type::StaticTypeInformation {
+                        descriptor: #struct_descriptor,
+                        member_list: &[#(#member_list,)*]
+                    };
             };
 
             let create_dynamic_sample_quote = quote! {
-                let mut data = dust_dds::xtypes::dynamic_type::DynamicDataFactory::create_data(Self::get_type());
+                let mut data = dust_dds::xtypes::dynamic_type::DynamicDataFactory::create_data();
                 #(#member_dynamic_sample_seq)*
                 data
             };
@@ -150,25 +174,25 @@ pub fn expand_type_support(input: &DeriveInput) -> Result<TokenStream> {
             // Separate between Unions and Enumeration which are both
             // mapped as Rust enum types
             if is_enum_xtypes_union(data_enum) {
-                let union_builder = quote! {
-                    extern crate alloc;
-                    let mut builder = dust_dds::xtypes::dynamic_type::DynamicTypeBuilderFactory::create_type(
-                        dust_dds::xtypes::dynamic_type::TypeDescriptor {
-                            kind: dust_dds::xtypes::dynamic_type::TypeKind::UNION,
-                            name: alloc::string::String::from(#type_name),
-                            base_type: None,
-                            discriminator_type: None,
-                            bound: alloc::vec::Vec::new(),
-                            element_type: None,
-                            key_element_type: None,
-                            extensibility_kind: #extensibility_kind,
-                            is_nested: #is_nested,
-                        });
+                let union_descriptor = quote! {
+                    &dust_dds::xtypes::dynamic_type::TypeDescriptor {
+                        kind: dust_dds::xtypes::dynamic_type::TypeKind::UNION,
+                        name: #type_name,
+                        base_type: None,
+                        discriminator_type: None,
+                        bound: None,
+                        element_type: None,
+                        key_element_type: None,
+                        extensibility_kind: #extensibility_kind,
+                        is_nested: #is_nested,
+                    }
                 };
                 let get_type_quote = quote! {
-                    #union_builder
-
-                    builder.build()
+                    const r#TYPE: &'static dyn dust_dds::xtypes::dynamic_type::DynamicType =
+                        &dust_dds::xtypes::dynamic_type::StaticTypeInformation {
+                            descriptor: #union_descriptor,
+                            member_list: &[]
+                        };
                 };
 
                 let create_dynamic_sample_quote = quote! {todo!()};
@@ -183,33 +207,34 @@ pub fn expand_type_support(input: &DeriveInput) -> Result<TokenStream> {
             } else {
                 // Note: Mapping has to be done with a match self strategy because the enum might not be copy so casting it using e.g. "self as i64" would
                 // be consuming it.
-                let discriminator_type = quote! {dust_dds::xtypes::dynamic_type::DynamicTypeBuilderFactory::get_primitive_type(dust_dds::xtypes::dynamic_type::TypeKind::INT32)};
+                let discriminator_type =
+                    quote! {<i32 as dust_dds::xtypes::binding::XTypesBinding>::TYPE_INFORMATION};
                 let discriminator_dynamic_value =
                     quote! {data.set_int32_value(0, self as i32).unwrap();};
 
-                let enum_builder = quote! {
-                    extern crate alloc;
-                    let mut builder = dust_dds::xtypes::dynamic_type::DynamicTypeBuilderFactory::create_type(
-                        dust_dds::xtypes::dynamic_type::TypeDescriptor {
-                            kind: dust_dds::xtypes::dynamic_type::TypeKind::ENUM,
-                            name: alloc::string::String::from(#type_name),
-                            base_type: None,
-                            discriminator_type: Some(#discriminator_type),
-                            bound: alloc::vec::Vec::new(),
-                            element_type: None,
-                            key_element_type: None,
-                            extensibility_kind: #extensibility_kind,
-                            is_nested: #is_nested,
-                        });
+                let enum_descriptor = quote! {
+                    &dust_dds::xtypes::dynamic_type::TypeDescriptor {
+                        kind: dust_dds::xtypes::dynamic_type::TypeKind::ENUM,
+                        name: #type_name,
+                        base_type: None,
+                        discriminator_type: Some(#discriminator_type),
+                        bound: None,
+                        element_type: None,
+                        key_element_type: None,
+                        extensibility_kind: #extensibility_kind,
+                        is_nested: #is_nested,
+                    }
                 };
                 let get_type_quote = quote! {
-                    #enum_builder
-
-                    builder.build()
+                    const r#TYPE: &'static dyn dust_dds::xtypes::dynamic_type::DynamicType =
+                        &dust_dds::xtypes::dynamic_type::StaticTypeInformation {
+                            descriptor: #enum_descriptor,
+                            member_list: &[]
+                        };
                 };
 
                 let create_dynamic_sample_quote = quote! {
-                    let mut data = dust_dds::xtypes::dynamic_type::DynamicDataFactory::create_data(Self::get_type());
+                    let mut data = dust_dds::xtypes::dynamic_type::DynamicDataFactory::create_data();
                     #discriminator_dynamic_value
                     data
                 };
@@ -243,14 +268,9 @@ pub fn expand_type_support(input: &DeriveInput) -> Result<TokenStream> {
     Ok(quote! {
         #[automatically_derived]
         impl #impl_generics dust_dds::infrastructure::type_support::TypeSupport for #ident #type_generics #where_clause {
-            #[inline]
-            fn get_type_name() -> &'static str {
-                #type_name
-            }
+            const TYPE_NAME: &'static str = #type_name;
 
-            fn get_type() -> dust_dds::xtypes::dynamic_type::DynamicType {
-                #get_type_quote
-            }
+            #get_type_quote
 
             fn create_sample(mut src: dust_dds::xtypes::dynamic_type::DynamicData) -> Self {
                 #create_sample_quote

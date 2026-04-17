@@ -23,28 +23,28 @@ const PL_CDR2_LE: RepresentationIdentifier = [0x00, 0x0b];
 
 pub struct CdrDeserializer;
 impl CdrDeserializer {
-    pub fn deserialize(dynamic_type: DynamicType, buffer: &[u8]) -> XTypesResult<DynamicData> {
+    pub fn deserialize(dynamic_type: &dyn DynamicType, buffer: &[u8]) -> XTypesResult<DynamicData> {
         if buffer.len() < 4 {
             return Err(XTypesError::NotEnoughData);
         }
-        let mut dynamic_data = DynamicDataFactory::create_data(dynamic_type.clone());
+        let mut dynamic_data = DynamicDataFactory::create_data();
         let representation_identifier = [buffer[0], buffer[1]];
         match representation_identifier {
             CDR_BE | PL_CDR_BE => {
                 let mut deserializer = Cdr1Deserializer::new(&buffer[4..], BigEndian);
-                deserializer.deserialize_structure(&dynamic_type, &mut dynamic_data)?;
+                deserializer.deserialize_structure(dynamic_type, &mut dynamic_data)?;
             }
             CDR_LE | PL_CDR_LE => {
                 let mut deserializer = Cdr1Deserializer::new(&buffer[4..], LittleEndian);
-                deserializer.deserialize_structure(&dynamic_type, &mut dynamic_data)?;
+                deserializer.deserialize_structure(dynamic_type, &mut dynamic_data)?;
             }
             CDR2_BE | D_CDR2_BE | PL_CDR2_BE => {
                 let mut deserializer = Cdr2Deserializer::new(&buffer[4..], BigEndian);
-                deserializer.deserialize_structure(&dynamic_type, &mut dynamic_data)?;
+                deserializer.deserialize_structure(dynamic_type, &mut dynamic_data)?;
             }
             CDR2_LE | D_CDR2_LE | PL_CDR2_LE => {
                 let mut deserializer = Cdr2Deserializer::new(&buffer[4..], LittleEndian);
-                deserializer.deserialize_structure(&dynamic_type, &mut dynamic_data)?;
+                deserializer.deserialize_structure(dynamic_type, &mut dynamic_data)?;
             }
             _ => return Err(XTypesError::InvalidData),
         }
@@ -52,18 +52,18 @@ impl CdrDeserializer {
     }
 
     pub fn deserialize_builtin(
-        dynamic_type: DynamicType,
+        dynamic_type: &dyn DynamicType,
         buffer: &[u8],
     ) -> XTypesResult<DynamicData> {
         if buffer.len() < 4 {
             return Err(XTypesError::NotEnoughData);
         }
-        let mut dynamic_data = DynamicDataFactory::create_data(dynamic_type.clone());
+        let mut dynamic_data = DynamicDataFactory::create_data();
         let representation_identifier = [buffer[0], buffer[1]];
         match representation_identifier {
             PL_CDR_LE => {
                 let mut deserializer = RtpsPlCdrDeserializer::new(&buffer[4..]);
-                deserializer.deserialize_structure(&dynamic_type, &mut dynamic_data)?;
+                deserializer.deserialize_structure(dynamic_type, &mut dynamic_data)?;
             }
             _ => return Err(XTypesError::NotSupported(representation_identifier)),
         }
@@ -207,16 +207,16 @@ impl EndiannessRead for LittleEndian {
 trait XTypesDeserialize {
     fn deserialize_complex_value(
         &mut self,
-        dynamic_type: &DynamicType,
+        dynamic_type: &dyn DynamicType,
     ) -> XTypesResult<DynamicData> {
-        let mut dynamic_data = DynamicDataFactory::create_data(dynamic_type.clone());
+        let mut dynamic_data = DynamicDataFactory::create_data();
         self.deserialize_structure(dynamic_type, &mut dynamic_data)?;
         Ok(dynamic_data)
     }
 
     fn deserialize_structure(
         &mut self,
-        dynamic_type: &DynamicType,
+        dynamic_type: &dyn DynamicType,
         dynamic_data: &mut DynamicData,
     ) -> XTypesResult<()> {
         // Deserialize the top-level which must be either a struct, an enum or a union.
@@ -264,7 +264,7 @@ trait XTypesDeserialize {
 
     fn deserialize_final_struct(
         &mut self,
-        dynamic_type: &DynamicType,
+        dynamic_type: &dyn DynamicType,
         dynamic_data: &mut DynamicData,
     ) -> XTypesResult<()> {
         for member_index in 0..dynamic_type.get_member_count() {
@@ -276,7 +276,7 @@ trait XTypesDeserialize {
 
     fn deserialize_appendable_struct(
         &mut self,
-        dynamic_type: &DynamicType,
+        dynamic_type: &dyn DynamicType,
         dynamic_data: &mut DynamicData,
     ) -> XTypesResult<()> {
         self.deserialize_final_struct(dynamic_type, dynamic_data)
@@ -284,7 +284,7 @@ trait XTypesDeserialize {
 
     fn deserialize_mutable_struct(
         &mut self,
-        dynamic_type: &DynamicType,
+        dynamic_type: &dyn DynamicType,
         dynamic_data: &mut DynamicData,
     ) -> XTypesResult<()>;
 
@@ -354,13 +354,13 @@ trait XTypesDeserialize {
             TypeKind::ALIAS => todo!(),
             TypeKind::ENUM => dynamic_data.set_complex_value(
                 member.get_id(),
-                self.deserialize_complex_value(&member_descriptor.r#type)?,
+                self.deserialize_complex_value(member_descriptor.r#type)?,
             ),
             TypeKind::BITMASK => todo!(),
             TypeKind::ANNOTATION => todo!(),
             TypeKind::STRUCTURE => dynamic_data.set_complex_value(
                 member.get_id(),
-                self.deserialize_complex_value(&member_descriptor.r#type)?,
+                self.deserialize_complex_value(member_descriptor.r#type)?,
             ),
             TypeKind::UNION => todo!(),
             TypeKind::BITSET => todo!(),
@@ -382,7 +382,12 @@ trait XTypesDeserialize {
             .element_type
             .as_ref()
             .expect("Sequence must have element type");
-        let bound = member.get_descriptor()?.r#type.get_descriptor().bound[0];
+        let bound = member
+            .get_descriptor()?
+            .r#type
+            .get_descriptor()
+            .bound
+            .ok_or(XTypesError::InvalidType)?;
         match sequence_type.get_kind() {
             TypeKind::NONE => todo!(),
             TypeKind::BOOLEAN => dynamic_data.set_boolean_values(
@@ -488,7 +493,6 @@ trait XTypesDeserialize {
             .r#type
             .get_descriptor()
             .element_type
-            .as_ref()
             .expect("must have element type");
         let length = self.deserialize_primitive_type::<u32>()?;
         for _ in 0..length {
@@ -729,7 +733,7 @@ impl<'a, E: EndiannessRead, V: CdrVersion> Read for CdrReader<'a, E, V> {
 impl<'a, E: EndiannessRead> XTypesDeserialize for Cdr1Deserializer<'a, E> {
     fn deserialize_mutable_struct(
         &mut self,
-        dynamic_type: &DynamicType,
+        dynamic_type: &dyn DynamicType,
         dynamic_data: &mut DynamicData,
     ) -> XTypesResult<()> {
         for member_index in 0..dynamic_type.get_member_count() {
@@ -740,14 +744,7 @@ impl<'a, E: EndiannessRead> XTypesDeserialize for Cdr1Deserializer<'a, E> {
             self.reader.set_position(0);
             if self.reader.seek_to_pid_le(pid)? {
                 self.deserialize_final_member(member, dynamic_data)?;
-            } else if member_descriptor.is_optional {
-                let default_value = member_descriptor
-                    .default_value
-                    .as_ref()
-                    .cloned()
-                    .expect("default value must exist for optional type");
-                dynamic_data.set_value(pid as u32, default_value);
-            } else {
+            } else if !member_descriptor.is_optional {
                 return Err(XTypesError::PidNotFound(pid));
             }
         }
@@ -766,7 +763,7 @@ impl<'a, E: EndiannessRead> XTypesDeserialize for Cdr2Deserializer<'a, E> {
 
     fn deserialize_mutable_struct(
         &mut self,
-        dynamic_type: &DynamicType,
+        dynamic_type: &dyn DynamicType,
         dynamic_data: &mut DynamicData,
     ) -> XTypesResult<()> {
         for member_index in 0..dynamic_type.get_member_count() {
@@ -777,14 +774,7 @@ impl<'a, E: EndiannessRead> XTypesDeserialize for Cdr2Deserializer<'a, E> {
             self.reader.set_position(0);
             if self.reader.seek_to_pid_le(pid)? {
                 self.deserialize_final_member(member, dynamic_data)?;
-            } else if member_descriptor.is_optional {
-                let default_value = member_descriptor
-                    .default_value
-                    .as_ref()
-                    .cloned()
-                    .expect("default value must exist for optional type");
-                dynamic_data.set_value(pid as u32, default_value);
-            } else {
+            } else if !member_descriptor.is_optional {
                 return Err(XTypesError::PidNotFound(pid));
             }
         }
@@ -793,7 +783,7 @@ impl<'a, E: EndiannessRead> XTypesDeserialize for Cdr2Deserializer<'a, E> {
 
     fn deserialize_appendable_struct(
         &mut self,
-        dynamic_type: &DynamicType,
+        dynamic_type: &dyn DynamicType,
         dynamic_data: &mut DynamicData,
     ) -> XTypesResult<()> {
         let _dheader = self.deserialize_primitive_type::<u32>()?;
@@ -804,7 +794,7 @@ impl<'a, E: EndiannessRead> XTypesDeserialize for Cdr2Deserializer<'a, E> {
 impl<'a> XTypesDeserialize for RtpsPlCdrDeserializer<'a> {
     fn deserialize_mutable_struct(
         &mut self,
-        dynamic_type: &DynamicType,
+        dynamic_type: &dyn DynamicType,
         dynamic_data: &mut DynamicData,
     ) -> XTypesResult<()> {
         for member_index in 0..dynamic_type.get_member_count() {
@@ -822,22 +812,17 @@ impl<'a> XTypesDeserialize for RtpsPlCdrDeserializer<'a> {
                                 .r#type
                                 .get_descriptor()
                                 .element_type
-                                .as_ref()
                                 .expect("must have element_type"),
                         )?,
                     );
                 }
-                dynamic_data.set_complex_values(pid as u32, sequence)?;
+                // Only add empty sequences to non-optional members
+                if !(sequence.is_empty() && member_descriptor.is_optional) {
+                    dynamic_data.set_complex_values(pid as u32, sequence)?;
+                }
             } else if self.cdr1_deserializer.reader.seek_to_pid_le(pid)? {
                 self.deserialize_final_member(member, dynamic_data)?;
-            } else if member_descriptor.is_optional {
-                let default_value = member_descriptor
-                    .default_value
-                    .as_ref()
-                    .cloned()
-                    .expect("default value must exist for optional type");
-                dynamic_data.set_value(pid as u32, default_value);
-            } else {
+            } else if !member_descriptor.is_optional {
                 return Err(XTypesError::PidNotFound(pid));
             }
         }
@@ -868,7 +853,7 @@ mod tests {
         .create_dynamic_sample();
         assert_eq!(
             CdrDeserializer::deserialize(
-                FinalType::get_type(),
+                FinalType::TYPE,
                 &[
                     0x00, 0x00, 0x00, 0x00, // CDR_BE
                     0, 7, 0, 0, 0, 0, 0, 0, // field_u16 | padding (6 bytes)
@@ -880,7 +865,7 @@ mod tests {
         );
         assert_eq!(
             CdrDeserializer::deserialize(
-                FinalType::get_type(),
+                FinalType::TYPE,
                 &[
                     0x00, 0x01, 0x00, 0x00, // CDR_LE
                     7, 0, 0, 0, 0, 0, 0, 0, // field_u16 | padding (6 bytes)
@@ -892,7 +877,7 @@ mod tests {
         );
         assert_eq!(
             CdrDeserializer::deserialize(
-                FinalType::get_type(),
+                FinalType::TYPE,
                 &[
                     0x00, 0x06, 0x00, 0x00, // CDR2_BE
                     0, 7, 0, 0, // field_u16 | padding (2 bytes)
@@ -904,7 +889,7 @@ mod tests {
         );
         assert_eq!(
             CdrDeserializer::deserialize(
-                FinalType::get_type(),
+                FinalType::TYPE,
                 &[
                     0x00, 0x07, 0x00, 0x00, // CDR2_LE
                     7, 0, 0, 0, // field_u16 | padding (2 bytes)
@@ -942,7 +927,7 @@ mod tests {
 
         assert_eq!(
             CdrDeserializer::deserialize(
-                NestedFinalType::get_type(),
+                NestedFinalType::TYPE,
                 &[
                     0x00, 0x00, 0x00, 0x00, // CDR_BE
                     0, 7, 0, 0, 0, 0, 0, 0, // nested FinalType (u16) | padding (6 bytes)
@@ -955,7 +940,7 @@ mod tests {
         );
         assert_eq!(
             CdrDeserializer::deserialize(
-                NestedFinalType::get_type(),
+                NestedFinalType::TYPE,
                 &[
                     0x00, 0x01, 0x00, 0x00, // CDR_LE
                     7, 0, 0, 0, 0, 0, 0, 0, // nested FinalType (u16) | padding (6 bytes)
@@ -969,7 +954,7 @@ mod tests {
 
         assert_eq!(
             CdrDeserializer::deserialize(
-                NestedFinalType::get_type(),
+                NestedFinalType::TYPE,
                 &[
                     0x00, 0x06, 0x00, 0x00, // CDR2_BE
                     0, 7, 0, 0, // nested FinalType (u16) | padding
@@ -983,7 +968,7 @@ mod tests {
 
         assert_eq!(
             CdrDeserializer::deserialize(
-                NestedFinalType::get_type(),
+                NestedFinalType::TYPE,
                 &[
                     0x00, 0x07, 0x00, 0x00, // CDR2_LE
                     7, 0, 0, 0, // nested FinalType (u16) | padding (2 bytes)
@@ -1013,7 +998,7 @@ mod tests {
         .create_dynamic_sample();
         assert_eq!(
             CdrDeserializer::deserialize(
-                FinalTypeWithSequence::get_type(),
+                FinalTypeWithSequence::TYPE,
                 &[
                     0x00, 0x00, 0x00, 0x00, // CDR_BE
                     0, 7, 0, 0, 0, 0, 0, 0, // field_u16 | padding (6 bytes)
@@ -1028,7 +1013,7 @@ mod tests {
         );
         assert_eq!(
             CdrDeserializer::deserialize(
-                FinalTypeWithSequence::get_type(),
+                FinalTypeWithSequence::TYPE,
                 &[
                     0x00, 0x01, 0x00, 0x00, // CDR_LE
                     7, 0, 0, 0, 0, 0, 0, 0, // field_u16 | padding (6 bytes)
@@ -1043,7 +1028,7 @@ mod tests {
         );
         assert_eq!(
             CdrDeserializer::deserialize(
-                FinalTypeWithSequence::get_type(),
+                FinalTypeWithSequence::TYPE,
                 &[
                     0x00, 0x06, 0x00, 0x00, // CDR2_BE
                     0, 7, 0, 0, // field_u16 | padding (2 bytes)
@@ -1058,7 +1043,7 @@ mod tests {
         );
         assert_eq!(
             CdrDeserializer::deserialize(
-                FinalTypeWithSequence::get_type(),
+                FinalTypeWithSequence::TYPE,
                 &[
                     0x00, 0x07, 0x00, 0x00, // CDR2_LE
                     7, 0, 0, 0, // field_u16 | padding (2 bytes)
@@ -1080,7 +1065,7 @@ mod tests {
         let expected = FinalString(String::from("Hola")).create_dynamic_sample();
         assert_eq!(
             CdrDeserializer::deserialize(
-                FinalString::get_type(),
+                FinalString::TYPE,
                 &[
                     0x00, 0x00, 0x00, 0x00, // CDR_BE
                     0, 0, 0, 5, //length
@@ -1093,7 +1078,7 @@ mod tests {
         );
         assert_eq!(
             CdrDeserializer::deserialize(
-                FinalString::get_type(),
+                FinalString::TYPE,
                 &[
                     0x00, 0x01, 0x00, 0x00, // CDR_LE
                     5, 0, 0, 0, //length
@@ -1106,7 +1091,7 @@ mod tests {
         );
         assert_eq!(
             CdrDeserializer::deserialize(
-                FinalString::get_type(),
+                FinalString::TYPE,
                 &[
                     0x00, 0x06, 0x00, 0x00, // CDR2_BE
                     0, 0, 0, 5, //length
@@ -1119,7 +1104,7 @@ mod tests {
         );
         assert_eq!(
             CdrDeserializer::deserialize(
-                FinalString::get_type(),
+                FinalString::TYPE,
                 &[
                     0x00, 0x07, 0x00, 0x00, // CDR2_LE
                     5, 0, 0, 0, //length
@@ -1139,7 +1124,7 @@ mod tests {
         let expected = ByteArray([1u8, 2]).create_dynamic_sample();
         assert_eq!(
             CdrDeserializer::deserialize(
-                ByteArray::get_type(),
+                ByteArray::TYPE,
                 &[
                     0x00, 0x00, 0x00, 0x00, // CDR_BE
                     1, 2
@@ -1150,7 +1135,7 @@ mod tests {
         );
         assert_eq!(
             CdrDeserializer::deserialize(
-                ByteArray::get_type(),
+                ByteArray::TYPE,
                 &[
                     0x00, 0x01, 0x00, 0x00, // CDR_LE
                     1, 2
@@ -1161,7 +1146,7 @@ mod tests {
         );
         assert_eq!(
             CdrDeserializer::deserialize(
-                ByteArray::get_type(),
+                ByteArray::TYPE,
                 &[
                     0x00, 0x06, 0x00, 0x00, // CDR2_BE
                     1, 2
@@ -1172,7 +1157,7 @@ mod tests {
         );
         assert_eq!(
             CdrDeserializer::deserialize(
-                ByteArray::get_type(),
+                ByteArray::TYPE,
                 &[
                     0x00, 0x07, 0x00, 0x00, // CD2R_LE
                     1, 2
@@ -1193,7 +1178,7 @@ mod tests {
         let expected = Sequence(vec![Atype(1), Atype(2)]).create_dynamic_sample();
         assert_eq!(
             CdrDeserializer::deserialize(
-                Sequence::get_type(),
+                Sequence::TYPE,
                 &[
                     0x00, 0x00, 0x00, 0x00, // CDR_BE
                     0, 0, 0, 2, // length
@@ -1222,7 +1207,7 @@ mod tests {
         .create_dynamic_sample();
         assert_eq!(
             CdrDeserializer::deserialize(
-                MutableType::get_type(),
+                MutableType::TYPE,
                 &[
                     0x00, 0x02, 0x00, 0x00, // PL_CDR_BE
                     0x00, 0x05A, 0, 1, // PID | length
@@ -1237,7 +1222,7 @@ mod tests {
         );
         assert_eq!(
             CdrDeserializer::deserialize(
-                MutableType::get_type(),
+                MutableType::TYPE,
                 &[
                     0x00, 0x03, 0x00, 0x00, // PL_CDR_LE
                     0x05A, 0x00, 1, 0, // PID | length
@@ -1252,7 +1237,7 @@ mod tests {
         );
         assert_eq!(
             CdrDeserializer::deserialize(
-                MutableType::get_type(),
+                MutableType::TYPE,
                 &[
                     0x00, 0x06, 0x00, 0x00, // PL_CDR2_BE
                     0x00, 0x05A, 0, 1, // PID | length
@@ -1267,7 +1252,7 @@ mod tests {
         );
         assert_eq!(
             CdrDeserializer::deserialize(
-                MutableType::get_type(),
+                MutableType::TYPE,
                 &[
                     0x00, 0x07, 0x00, 0x00, // PL_CDR2_LE
                     0x05A, 0x00, 1, 0, // PID | length
@@ -1298,7 +1283,7 @@ mod tests {
         .create_dynamic_sample();
         assert_eq!(
             CdrDeserializer::deserialize(
-                AppendableType::get_type(),
+                AppendableType::TYPE,
                 &[
                     0x00, 0x00, 0x00, 0x00, // CDR_BE
                     7, 0, 0, 0, // key | padding
@@ -1310,7 +1295,7 @@ mod tests {
         );
         assert_eq!(
             CdrDeserializer::deserialize(
-                AppendableType::get_type(),
+                AppendableType::TYPE,
                 &[
                     0x00, 0x01, 0x00, 0x00, // CDR_LE
                     7, 0, 0, 0, // key | padding
@@ -1322,7 +1307,7 @@ mod tests {
         );
         assert_eq!(
             CdrDeserializer::deserialize(
-                AppendableType::get_type(),
+                AppendableType::TYPE,
                 &[
                     0x00, 0x08, 0x00, 0x00, // D_CDR2_BE
                     0, 0, 0, 8, // DHEADER
@@ -1335,7 +1320,7 @@ mod tests {
         );
         assert_eq!(
             CdrDeserializer::deserialize(
-                AppendableType::get_type(),
+                AppendableType::TYPE,
                 &[
                     0x00, 0x09, 0x00, 0x00, // D_CDR2_LE
                     0, 0, 0, 8, // DHEADER
@@ -1370,7 +1355,7 @@ mod tests {
         .create_dynamic_sample();
         assert_eq!(
             CdrDeserializer::deserialize(
-                AppendableShapesType::get_type(),
+                AppendableShapesType::TYPE,
                 &[
                     0x00, 0x00, 0x00, 0x00, // CDR_BE
                     0, 0, 0, 5, // color: length
@@ -1387,7 +1372,7 @@ mod tests {
         );
         assert_eq!(
             CdrDeserializer::deserialize(
-                AppendableShapesType::get_type(),
+                AppendableShapesType::TYPE,
                 &[
                     0x00, 0x01, 0x00, 0x00, // CDR_LE
                     5, 0, 0, 0, // color: length
@@ -1404,7 +1389,7 @@ mod tests {
         );
         assert_eq!(
             CdrDeserializer::deserialize(
-                AppendableShapesType::get_type(),
+                AppendableShapesType::TYPE,
                 &[
                     0x00, 0x08, 0x00, 0x00, // D_CDR2_BE
                     0, 0, 0, 28, // Dheader
@@ -1422,7 +1407,7 @@ mod tests {
         );
         assert_eq!(
             CdrDeserializer::deserialize(
-                AppendableShapesType::get_type(),
+                AppendableShapesType::TYPE,
                 &[
                     0x00, 0x09, 0x00, 0x00, // D_CDR2_LE
                     28, 0, 0, 0, // Dheader

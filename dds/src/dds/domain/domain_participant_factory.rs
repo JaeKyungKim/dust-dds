@@ -1,3 +1,5 @@
+use core::ops::DerefMut;
+
 use super::domain_participant::DomainParticipant;
 use crate::{
     configuration::DustDdsConfiguration,
@@ -9,7 +11,7 @@ use crate::{
         qos::{DomainParticipantFactoryQos, DomainParticipantQos, QosKind},
         status::StatusKind,
     },
-    runtime::DdsRuntime,
+    rtps_udp_transport::udp_transport::RtpsUdpTransportParticipantFactory,
     std_runtime::executor::block_on,
 };
 use tracing::warn;
@@ -17,13 +19,18 @@ use tracing::warn;
 /// The sole purpose of this class is to allow the creation and destruction of [`DomainParticipant`] objects.
 /// [`DomainParticipantFactory`] itself has no factory. It is a pre-existing singleton object that can be accessed by means of the
 /// [`DomainParticipantFactory::get_instance`] operation.
-pub struct DomainParticipantFactory<R: DdsRuntime> {
-    participant_factory_async: &'static DomainParticipantFactoryAsync<R>,
+pub struct DomainParticipantFactory {
+    participant_factory_async:
+        &'static DomainParticipantFactoryAsync<RtpsUdpTransportParticipantFactory>,
 }
 
-impl<R: DdsRuntime> DomainParticipantFactory<R> {
+impl DomainParticipantFactory {
     /// Construct a new ['DomainParticipantFactory'] from an existing ['DomainParticipantFactoryAsync'] static reference
-    pub fn new(participant_factory_async: &'static DomainParticipantFactoryAsync<R>) -> Self {
+    pub fn new(
+        participant_factory_async: &'static DomainParticipantFactoryAsync<
+            RtpsUdpTransportParticipantFactory,
+        >,
+    ) -> Self {
         Self {
             participant_factory_async,
         }
@@ -113,34 +120,29 @@ impl<R: DdsRuntime> DomainParticipantFactory<R> {
     }
 }
 
-impl<R: DdsRuntime> DomainParticipantFactory<R> {
-    /// Set the configuration of the [`DomainParticipantFactory`] singleton
-    pub fn set_configuration(&self, configuration: DustDdsConfiguration) -> DdsResult<()> {
-        block_on(
-            self.participant_factory_async
-                .set_configuration(configuration),
-        )
+impl DomainParticipantFactory {
+    /// Get a mutable reference to the transport object
+    pub fn get_mut_transport(
+        &self,
+    ) -> impl DerefMut<Target = RtpsUdpTransportParticipantFactory> + '_ {
+        block_on(self.participant_factory_async.get_mut_transport())
     }
 
-    /// Get the current configuration of the [`DomainParticipantFactory`] singleton
-    pub fn get_configuration(&self) -> DdsResult<DustDdsConfiguration> {
-        block_on(self.participant_factory_async.get_configuration())
+    /// Get a mutable reference to the configuration object
+    pub fn get_mut_configuration(&self) -> impl DerefMut<Target = DustDdsConfiguration> + '_ {
+        block_on(self.participant_factory_async.get_mut_configuration())
     }
 }
 
-#[cfg(feature = "std")]
-impl DomainParticipantFactory<crate::std_runtime::StdRuntime> {
+impl DomainParticipantFactory {
     /// This operation returns the [`DomainParticipantFactory`] singleton. The operation is idempotent, that is, it can be called multiple
     /// times without side-effects and it will return the same [`DomainParticipantFactory`] instance.
     #[tracing::instrument]
     pub fn get_instance() -> &'static Self {
-        static PARTICIPANT_FACTORY: std::sync::OnceLock<
-            DomainParticipantFactory<crate::std_runtime::StdRuntime>,
-        > = std::sync::OnceLock::new();
+        static PARTICIPANT_FACTORY: std::sync::OnceLock<DomainParticipantFactory> =
+            std::sync::OnceLock::new();
         PARTICIPANT_FACTORY.get_or_init(|| DomainParticipantFactory {
-            participant_factory_async: DomainParticipantFactoryAsync::<
-                crate::std_runtime::StdRuntime,
-            >::get_instance(),
+            participant_factory_async: DomainParticipantFactoryAsync::get_instance(),
         })
     }
 }

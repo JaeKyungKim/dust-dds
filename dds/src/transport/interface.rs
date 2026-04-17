@@ -1,13 +1,36 @@
-use crate::{dcps::channels::mpsc::MpscSender, transport::types::Locator};
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::{future::Future, pin::Pin};
+use crate::{
+    dcps::dcps_mail::{DcpsMail, MessageServiceMail},
+    dds_async::domain_participant_factory::DcpsSender,
+    infrastructure::instance::InstanceHandle,
+    transport::types::Locator,
+};
+use alloc::{boxed::Box, vec::Vec};
 
 pub trait WriteMessage {
-    fn write_message(
-        &self,
-        buf: &[u8],
-        locators: &[Locator],
-    ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    fn write_message(&self, buf: &[u8], locators: &[Locator]);
+}
+
+#[derive(Clone)]
+pub struct TransportDataReceiver {
+    participant_handle: InstanceHandle,
+    dcps_sender: DcpsSender,
+}
+impl TransportDataReceiver {
+    pub(crate) fn new(participant_handle: InstanceHandle, dcps_sender: DcpsSender) -> Self {
+        Self {
+            participant_handle,
+            dcps_sender,
+        }
+    }
+
+    pub async fn receive_message(&self, data_message: Vec<u8>) {
+        self.dcps_sender
+            .send(DcpsMail::Message(MessageServiceMail::HandleData {
+                participant_handle: self.participant_handle,
+                data_message,
+            }))
+            .await;
+    }
 }
 
 pub struct RtpsTransportParticipant {
@@ -18,11 +41,10 @@ pub struct RtpsTransportParticipant {
     pub default_multicast_locator_list: Vec<Locator>,
     pub fragment_size: usize,
 }
-
 pub trait TransportParticipantFactory: Send + 'static {
     fn create_participant(
         &self,
         domain_id: i32,
-        data_channel_sender: MpscSender<Arc<[u8]>>,
-    ) -> impl Future<Output = RtpsTransportParticipant> + Send;
+        data_receiver: TransportDataReceiver,
+    ) -> RtpsTransportParticipant;
 }
