@@ -175,6 +175,63 @@ pub const ENTITYID_PARTICIPANT: EntityId = EntityId::new([0, 0, 0x01], BUILT_IN_
 /// Must be possible to represent using 64 bits.
 pub type SequenceNumber = i64;
 
+/// SampleIdentity_t
+/// Identifies a specific sample written by a specific DataWriter.
+/// Defined by RTPS 2.3 §9.3.2 and used by the DDS-RPC mapping to
+/// correlate replies with their originating requests through the
+/// RELATED_SAMPLE_IDENTITY inline QoS parameter (PID 0x0083).
+/// On the wire this value is 24 octets: the 16-octet GUID followed by
+/// the 8-octet SequenceNumber.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, TypeSupport)]
+#[dust_dds(extensibility = "final", nested)]
+pub struct SampleIdentity {
+    writer_guid: Guid,
+    sequence_number: SequenceNumber,
+}
+
+impl SampleIdentity {
+    #[inline]
+    pub const fn new(writer_guid: Guid, sequence_number: SequenceNumber) -> Self {
+        Self {
+            writer_guid,
+            sequence_number,
+        }
+    }
+
+    #[inline]
+    pub const fn writer_guid(&self) -> Guid {
+        self.writer_guid
+    }
+
+    #[inline]
+    pub const fn sequence_number(&self) -> SequenceNumber {
+        self.sequence_number
+    }
+}
+
+impl Default for SampleIdentity {
+    #[inline]
+    fn default() -> Self {
+        SAMPLE_IDENTITY_UNKNOWN
+    }
+}
+
+// Manual Hash because `Guid` does not derive Hash. Hash the canonical
+// 16-byte GUID representation followed by the sequence number so two
+// identities with the same prefix+entity_id+sequence hash equal.
+impl core::hash::Hash for SampleIdentity {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        let guid_bytes: [u8; 16] = self.writer_guid.into();
+        guid_bytes.hash(state);
+        self.sequence_number.hash(state);
+    }
+}
+
+pub const SAMPLE_IDENTITY_UNKNOWN: SampleIdentity = SampleIdentity {
+    writer_guid: GUID_UNKNOWN,
+    sequence_number: 0,
+};
+
 /// TopicKind_t
 /// Enumeration used to distinguish whether a Topic has defined some fields within to be used as the 'key' that identifies data-instances within the Topic. See the DDS specification for more details on keys.
 /// The following values are reserved by the protocol: NO_KEY, WITH_KEY
@@ -357,4 +414,34 @@ pub struct ReaderProxy {
     pub unicast_locator_list: Vec<Locator>,
     pub multicast_locator_list: Vec<Locator>,
     pub expects_inline_qos: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::mem;
+
+    #[test]
+    fn sample_identity_size_is_24_bytes() {
+        // 16 octets GUID + 8 octets SequenceNumber = 24 octets total.
+        assert_eq!(mem::size_of::<SampleIdentity>(), 24);
+    }
+
+    #[test]
+    fn sample_identity_unknown_is_zeroed() {
+        assert_eq!(SAMPLE_IDENTITY_UNKNOWN.writer_guid(), GUID_UNKNOWN);
+        assert_eq!(SAMPLE_IDENTITY_UNKNOWN.sequence_number(), 0);
+        assert_eq!(SampleIdentity::default(), SAMPLE_IDENTITY_UNKNOWN);
+    }
+
+    #[test]
+    fn sample_identity_new_preserves_fields() {
+        let guid = Guid::new(
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            EntityId::new([0x00, 0x00, 0x12], USER_DEFINED_WRITER_WITH_KEY),
+        );
+        let id = SampleIdentity::new(guid, 42);
+        assert_eq!(id.writer_guid(), guid);
+        assert_eq!(id.sequence_number(), 42);
+    }
 }
