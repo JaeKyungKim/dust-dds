@@ -458,6 +458,7 @@ impl DcpsDomainParticipant {
             source_timestamp: Some(timestamp.into()),
             instance_handle: Some(instance_handle.into()),
             data_value: serialized_data.into(),
+            related_sample_identity: None,
         };
         let seq_num = change.sequence_number;
 

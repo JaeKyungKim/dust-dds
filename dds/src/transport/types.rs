@@ -403,6 +403,11 @@ pub struct CacheChange {
     pub source_timestamp: Option<Time>,
     pub instance_handle: Option<[u8; 16]>,
     pub data_value: Arc<[u8]>,
+    /// When present, carries the SampleIdentity this change is a reply
+    /// to. Serialised as the RELATED_SAMPLE_IDENTITY inline QoS
+    /// parameter (PID 0x0083) per RTPS 2.3 §9.6.2.9 and used by DDS-RPC
+    /// peers to correlate replies back to their originating requests.
+    pub related_sample_identity: Option<SampleIdentity>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]

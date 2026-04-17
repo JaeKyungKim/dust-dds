@@ -4761,6 +4761,7 @@ impl DataWriterEntity {
             source_timestamp: Some(timestamp.into()),
             instance_handle: Some(instance_handle.into()),
             data_value: serialized_key.into(),
+            related_sample_identity: None,
         };
         self.transport_writer
             .add_change(cache_change, message_writer, runtime);
@@ -4832,6 +4833,7 @@ impl DataWriterEntity {
             source_timestamp: Some(timestamp.into()),
             instance_handle: Some(instance_handle.into()),
             data_value: serialized_key.into(),
+            related_sample_identity: None,
         };
         self.transport_writer
             .add_change(cache_change, message_writer, runtime);
