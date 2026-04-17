@@ -1,5 +1,9 @@
 use crate::{
-    infrastructure::{instance::InstanceHandle, time::Time, type_support::TypeSupport},
+    infrastructure::{
+        instance::{InstanceHandle, SampleIdentity},
+        time::Time,
+        type_support::TypeSupport,
+    },
     xtypes::dynamic_type::DynamicData,
 };
 
@@ -113,4 +117,17 @@ pub struct SampleInfo {
     pub publication_handle: InstanceHandle,
     /// This field indicates whether the sample contains data or if it is only used to communicate of a change in the [`SampleInfo::instance_state`] of the instance.
     pub valid_data: bool,
+    /// [`SampleIdentity`] assigned to the sample by the originating
+    /// [`DataWriter`](crate::publication::data_writer::DataWriter) (RTPS 2.3 §9.3.2).
+    /// Servers can echo this value back as
+    /// [`SampleInfo::related_sample_identity`] on a reply so that
+    /// DDS-RPC clients can correlate requests and responses. `None`
+    /// when the source does not surface an identity.
+    pub sample_identity: Option<SampleIdentity>,
+    /// When the writer set a `related_sample_identity` via
+    /// [`WriteParams`](crate::infrastructure::instance::WriteParams),
+    /// this field surfaces the identity of the request this sample is
+    /// in reply to (RTPS 2.3 §9.6.2.9 PID_RELATED_SAMPLE_IDENTITY).
+    /// `None` for plain samples that are not replies.
+    pub related_sample_identity: Option<SampleIdentity>,
 }

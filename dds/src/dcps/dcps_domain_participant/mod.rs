@@ -41,7 +41,7 @@ use crate::{
     infrastructure::{
         domain::DomainId,
         error::{DdsError, DdsResult},
-        instance::{InstanceHandle, WriteParams},
+        instance::{InstanceHandle, SampleIdentity, WriteParams},
         qos::{
             DataReaderQos, DataWriterQos, DomainParticipantQos, PublisherQos, SubscriberQos,
             TopicQos,
@@ -5013,6 +5013,7 @@ impl InstanceState {
 struct ReaderSample {
     kind: ChangeKind,
     writer_guid: [u8; 16],
+    sequence_number: i64,
     instance_handle: InstanceHandle,
     source_timestamp: Option<Time>,
     data_value: DynamicData,
@@ -5020,6 +5021,7 @@ struct ReaderSample {
     disposed_generation_count: i32,
     no_writers_generation_count: i32,
     reception_timestamp: Time,
+    related_sample_identity: Option<SampleIdentity>,
 }
 
 struct IndexedSample {
@@ -5172,6 +5174,10 @@ impl DataReaderEntity {
                 | ChangeKind::NotAliveDisposedUnregistered => (None, false),
             };
 
+            let sample_identity = Some(SampleIdentity::new(
+                Guid::from(cache_change.writer_guid),
+                cache_change.sequence_number,
+            ));
             let sample_info = SampleInfo {
                 sample_state,
                 view_state,
@@ -5185,6 +5191,8 @@ impl DataReaderEntity {
                 instance_handle: cache_change.instance_handle,
                 publication_handle: InstanceHandle::new(cache_change.writer_guid),
                 valid_data,
+                sample_identity,
+                related_sample_identity: cache_change.related_sample_identity,
             };
 
             let sample = (data, sample_info);
@@ -5426,6 +5434,7 @@ impl DataReaderEntity {
         Ok(ReaderSample {
             kind: cache_change.kind,
             writer_guid: cache_change.writer_guid.into(),
+            sequence_number: cache_change.sequence_number,
             instance_handle,
             source_timestamp: cache_change.source_timestamp.map(Into::into),
             data_value,
@@ -5433,6 +5442,7 @@ impl DataReaderEntity {
             disposed_generation_count: instance.most_recent_disposed_generation_count,
             no_writers_generation_count: instance.most_recent_no_writers_generation_count,
             reception_timestamp,
+            related_sample_identity: cache_change.related_sample_identity,
         })
     }
 
