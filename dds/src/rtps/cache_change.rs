@@ -13,6 +13,21 @@ use alloc::{sync::Arc, vec::Vec};
 pub const PID_KEY_HASH: ParameterId = 0x0070;
 pub const PID_STATUS_INFO: ParameterId = 0x0071;
 pub const PID_RELATED_SAMPLE_IDENTITY: ParameterId = 0x0083;
+/// eProsima Fast DDS 2.6.x vendor extension for RELATED_SAMPLE_IDENTITY.
+///
+/// Humble `rmw_fastrtps_cpp` uses this PID exclusively for DDS-RPC
+/// reply correlation (see Fast DDS 2.6.x
+/// `include/fastdds/dds/core/policy/ParameterTypes.hpp:152` and
+/// `src/cpp/fastdds/core/policy/ParameterList.cpp:64-76` —
+/// `updateCacheChangeFromInlineQos` recognizes 0x800f and falls
+/// through `default:` for the standards-compliant 0x0083).
+///
+/// We emit both PIDs on writes and accept either on reads so we
+/// interop with Humble Fast DDS while staying spec-correct for
+/// Fast DDS ≥3.x, Cyclone (when it adopts 0x0083), and any other
+/// compliant peer. The payload layout is identical — only the
+/// parameter id number differs.
+pub const PID_RELATED_SAMPLE_IDENTITY_VENDOR_FASTDDS: ParameterId = 0x800fu16 as ParameterId;
 
 /// Serialised length of a SampleIdentity parameter payload per
 /// RTPS 2.3 §9.6.2.9: GuidPrefix (12 octets) + EntityId (4 octets) +
@@ -89,10 +104,18 @@ impl CacheChange {
             parameters.push(Parameter::new(PID_KEY_HASH, Arc::from(i)));
         }
         if let Some(sid) = self.related_sample_identity {
-            let payload = encode_sample_identity_le(&sid);
+            let payload: Arc<[u8]> = Arc::from(encode_sample_identity_le(&sid));
+            // Emit the standard PID first so first-match readers pick
+            // the spec-correct value.
             parameters.push(Parameter::new(
                 PID_RELATED_SAMPLE_IDENTITY,
-                Arc::from(payload),
+                Arc::clone(&payload),
+            ));
+            // Then the Fast DDS 2.6.x vendor PID so Humble Fast DDS
+            // (which ignores 0x0083) also sees the identity.
+            parameters.push(Parameter::new(
+                PID_RELATED_SAMPLE_IDENTITY_VENDOR_FASTDDS,
+                payload,
             ));
         }
         let parameter_list = ParameterList::new(parameters);
@@ -152,11 +175,21 @@ impl CacheChange {
             None => None,
         };
 
+        // Accept either the standard PID or the Fast DDS 2.6.x vendor
+        // PID. first-match: writers that emit both (ours) put the
+        // standard PID first, so we end up reading the spec-correct
+        // bytes; peers that only use the vendor extension
+        // (Humble Fast DDS) still match.
         let related_sample_identity = data_submessage
             .inline_qos()
             .parameter()
             .iter()
-            .find(|&x| x.parameter_id() == PID_RELATED_SAMPLE_IDENTITY)
+            .find(|&x| {
+                matches!(
+                    x.parameter_id(),
+                    PID_RELATED_SAMPLE_IDENTITY | PID_RELATED_SAMPLE_IDENTITY_VENDOR_FASTDDS,
+                )
+            })
             .and_then(|p| decode_sample_identity_le(p.value()));
 
         Ok(CacheChange {
@@ -258,5 +291,159 @@ mod tests {
         assert!(decode_sample_identity_le(&[0u8; 23]).is_none());
         assert!(decode_sample_identity_le(&[0u8; 25]).is_none());
         assert!(decode_sample_identity_le(&[]).is_none());
+    }
+
+    // ── B7 — Fast DDS 2.6.x vendor PID 0x800f dual-emit / dual-accept ──
+
+    use crate::transport::types::{ChangeKind, USER_DEFINED_READER_WITH_KEY};
+
+    fn cache_change_with_identity(sid: SampleIdentity) -> CacheChange {
+        CacheChange {
+            kind: ChangeKind::Alive,
+            writer_guid: Guid::new(
+                [0xAA; 12],
+                EntityId::new([0x00, 0x00, 0x34], USER_DEFINED_WRITER_WITH_KEY),
+            ),
+            sequence_number: 42,
+            source_timestamp: None,
+            instance_handle: None,
+            data_value: Arc::from([1u8, 2, 3, 4] as [u8; 4]),
+            related_sample_identity: Some(sid),
+        }
+    }
+
+    fn entity_ids() -> (EntityId, EntityId) {
+        (
+            EntityId::new([0x00, 0x00, 0x07], USER_DEFINED_READER_WITH_KEY),
+            EntityId::new([0x00, 0x00, 0x34], USER_DEFINED_WRITER_WITH_KEY),
+        )
+    }
+
+    /// B7-T1 — write path emits BOTH the standard 0x0083 and the
+    /// Fast DDS 2.6.x vendor 0x800f parameters, with the standard
+    /// first so first-match readers get the spec-correct bytes.
+    #[test]
+    fn reply_carries_both_pids() {
+        let sid = sample_identity_fixture();
+        let change = cache_change_with_identity(sid);
+        let (reader_id, writer_id) = entity_ids();
+        let submessage = change.as_data_submessage(reader_id, writer_id);
+        let params: Vec<ParameterId> = submessage
+            .inline_qos()
+            .parameter()
+            .iter()
+            .map(|p| p.parameter_id())
+            .collect();
+        assert!(
+            params.contains(&PID_RELATED_SAMPLE_IDENTITY),
+            "standard 0x0083 missing: {params:?}"
+        );
+        assert!(
+            params.contains(&PID_RELATED_SAMPLE_IDENTITY_VENDOR_FASTDDS),
+            "vendor 0x800f missing: {params:?}"
+        );
+        let std_pos = params
+            .iter()
+            .position(|&p| p == PID_RELATED_SAMPLE_IDENTITY)
+            .unwrap();
+        let vendor_pos = params
+            .iter()
+            .position(|&p| p == PID_RELATED_SAMPLE_IDENTITY_VENDOR_FASTDDS)
+            .unwrap();
+        assert!(
+            std_pos < vendor_pos,
+            "standard PID must come before vendor PID for first-match priority: \
+             got std at {std_pos}, vendor at {vendor_pos}"
+        );
+    }
+
+    /// B7-T2 — on the write path, both parameters share byte-identical
+    /// 24-byte payloads. A peer that accepts only one of them still
+    /// sees the same SampleIdentity.
+    #[test]
+    fn payload_layout_identical_across_pids() {
+        let sid = sample_identity_fixture();
+        let change = cache_change_with_identity(sid);
+        let (reader_id, writer_id) = entity_ids();
+        let submessage = change.as_data_submessage(reader_id, writer_id);
+        let mut std_bytes: Option<&[u8]> = None;
+        let mut vendor_bytes: Option<&[u8]> = None;
+        for p in submessage.inline_qos().parameter().iter() {
+            match p.parameter_id() {
+                PID_RELATED_SAMPLE_IDENTITY => std_bytes = Some(p.value()),
+                PID_RELATED_SAMPLE_IDENTITY_VENDOR_FASTDDS => vendor_bytes = Some(p.value()),
+                _ => (),
+            }
+        }
+        let std_bytes = std_bytes.expect("standard PID payload");
+        let vendor_bytes = vendor_bytes.expect("vendor PID payload");
+        assert_eq!(
+            std_bytes, vendor_bytes,
+            "dual-emit payloads diverge — identity would be inconsistent across peers"
+        );
+        assert_eq!(std_bytes.len(), 24, "RTPS §9.3.2 mandates 24-byte layout");
+    }
+
+    /// B7-T3 — reader path: peer sent only the standard 0x0083 (e.g.
+    /// Fast DDS ≥3.x, future Cyclone). Must still decode correctly.
+    #[test]
+    fn reader_accepts_standard_pid_only() {
+        let sid = sample_identity_fixture();
+        let payload: Arc<[u8]> = Arc::from(encode_sample_identity_le(&sid));
+        let parameters =
+            ParameterList::new(vec![Parameter::new(PID_RELATED_SAMPLE_IDENTITY, payload)]);
+        let submessage = make_data_submessage_with_inline_qos(parameters);
+        let decoded =
+            CacheChange::try_from_data_submessage(&submessage, [0xAA; 12], None).expect("decode");
+        assert_eq!(decoded.related_sample_identity, Some(sid));
+    }
+
+    /// B7-T4 — reader path: peer sent only the Fast DDS vendor 0x800f
+    /// (Humble `rmw_fastrtps_cpp` 2.6.x). Must also decode correctly.
+    #[test]
+    fn reader_accepts_vendor_pid_only() {
+        let sid = sample_identity_fixture();
+        let payload: Arc<[u8]> = Arc::from(encode_sample_identity_le(&sid));
+        let parameters = ParameterList::new(vec![Parameter::new(
+            PID_RELATED_SAMPLE_IDENTITY_VENDOR_FASTDDS,
+            payload,
+        )]);
+        let submessage = make_data_submessage_with_inline_qos(parameters);
+        let decoded =
+            CacheChange::try_from_data_submessage(&submessage, [0xAA; 12], None).expect("decode");
+        assert_eq!(decoded.related_sample_identity, Some(sid));
+    }
+
+    /// B7-T5 — reader path: peer sent both PIDs (e.g. our own writer,
+    /// or a peer doing the same dual-emit). First-match wins and
+    /// produces the same identity either way since the payloads are
+    /// identical (T2).
+    #[test]
+    fn reader_prefers_first_match_when_both_present() {
+        let sid = sample_identity_fixture();
+        let payload: Arc<[u8]> = Arc::from(encode_sample_identity_le(&sid));
+        let parameters = ParameterList::new(vec![
+            Parameter::new(PID_RELATED_SAMPLE_IDENTITY, Arc::clone(&payload)),
+            Parameter::new(PID_RELATED_SAMPLE_IDENTITY_VENDOR_FASTDDS, payload),
+        ]);
+        let submessage = make_data_submessage_with_inline_qos(parameters);
+        let decoded =
+            CacheChange::try_from_data_submessage(&submessage, [0xAA; 12], None).expect("decode");
+        assert_eq!(decoded.related_sample_identity, Some(sid));
+    }
+
+    fn make_data_submessage_with_inline_qos(parameters: ParameterList) -> DataSubmessage {
+        let (reader_id, writer_id) = entity_ids();
+        DataSubmessage::new(
+            true,
+            true,
+            false,
+            false,
+            reader_id,
+            writer_id,
+            7,
+            parameters,
+            Arc::<[u8]>::from([].as_slice()).into(),
+        )
     }
 }
