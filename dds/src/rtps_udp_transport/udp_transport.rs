@@ -211,8 +211,10 @@ impl TransportParticipantFactory for RtpsUdpTransportParticipantFactory {
             .unwrap(),
         );
 
-        let message_writer =
-            MessageWriter::new(default_unicast_socket.try_clone().expect("Socket cloning"));
+        let message_writer = MessageWriter::new(
+            default_unicast_socket.try_clone().expect("Socket cloning"),
+            self.interface_name.clone(),
+        );
 
         let global_participant = RtpsTransportParticipant {
             message_writer: Box::new(message_writer.clone()),
@@ -354,19 +356,31 @@ impl UdpLocator {
 
 struct MessageWriter {
     socket: UdpSocket,
+    /// Name of the NIC to constrain multicast egress to, or `None` to
+    /// iterate all interfaces (legacy behavior). Mirrors
+    /// [`RtpsUdpTransportParticipantFactory::interface_name`] and is the
+    /// fix for the lite_ros2 Phase 11-1.1 finding that A2
+    /// (`SecurityConfig::interface_name`) filtered advertised unicast
+    /// locators but NOT the multicast socket egress — SPDP was therefore
+    /// emitted on every physical NIC regardless of the setting.
+    interface_name: Option<String>,
 }
 
 impl Clone for MessageWriter {
     fn clone(&self) -> Self {
         Self {
             socket: self.socket.try_clone().expect("Socket cloning"),
+            interface_name: self.interface_name.clone(),
         }
     }
 }
 
 impl MessageWriter {
-    fn new(socket: UdpSocket) -> Self {
-        Self { socket }
+    fn new(socket: UdpSocket, interface_name: Option<String>) -> Self {
+        Self {
+            socket,
+            interface_name,
+        }
     }
 }
 impl WriteMessage for MessageWriter {
@@ -378,6 +392,19 @@ impl WriteMessage for MessageWriter {
                 let interface_addresses: Vec<_> = interface_addresses
                     .expect("Could not scan interfaces")
                     .into_iter()
+                    // Respect the configured interface_name filter so
+                    // multicast egress (SPDP) stays on the same NIC that
+                    // unicast locator advertisement is constrained to.
+                    // Without this filter a caller that set
+                    // interface_name=Some("wg0") would still see SPDP
+                    // emitted on every physical NIC, defeating the
+                    // whole WireGuard-isolation goal (lite_ros2 Phase
+                    // 11-1.1 FAIL root cause).
+                    .filter(|i| {
+                        self.interface_name
+                            .as_ref()
+                            .is_none_or(|name| name == &i.name)
+                    })
                     .flat_map(|i| {
                         i.addr.into_iter().filter_map(|a| match a {
                             Addr::V4(v4) => Some(v4.ip),
